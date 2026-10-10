@@ -37,7 +37,7 @@ forge build
 forge test
 ```
 
-`launch.json` is the Sepolia launch (fast clock: 1 day = 20 minutes; plea timings stay real). After the launch:
+`launch.json` is the Sepolia launch: 5-hour seasons for testing, the real 33-hour dead-man and real plea timings. After the launch:
 
 1. `forge script script/MineSalt.s.sol --rpc-url $RPC --private-key $KEY --broadcast` with `LAUNCH`, `POOL_MANAGER`, `IMD`, `STACKER`, `SEASONS` and `CREDIT_GAS` set: mines the hook salt and calls `deployHook`.
 2. `PleaLaunch.seed()` opens trading (the owner any time, anyone after `START`).

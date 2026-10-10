@@ -16,7 +16,7 @@
         "0x2B69099E59b05901faA1DD164fabf098bf831E82",
         "0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982",
         "18000",
-        "1650"
+        "118800"
       ]
     },
     {
@@ -56,5 +56,5 @@
       ]
     }
   ],
-  "notes": "PLEA (sell-gated token, one Cabal, seasons) on Sepolia (11155111), fast clock: 1 day = 20 minutes (season 5h = 18000 s, dead-man 27.5 min = 1650 s); plea timings stay real. Six contracts in order; constructors call only contracts deployed earlier in this list. PLEA(owner). CabalGate(plea, Intake, oracle fee asset = test IMD 0x44a1, pool IMD = TestIMD 0x2b69, oracle signer, season seconds, dead-man seconds). Seasons(plea, gate, pool IMD). Laureates(plea). PleaDistributor(plea, owner). PleaLaunch(plea, gate, seasons, laureates, distributor, Uniswap v4 PoolManager, TestIMD, imd/acc Stacker, credit gas, START): its constructor registers the contracts with PLEA (deploy transaction only) and commits to PleaHook's init code. After launch: deployHook(salt, initCode) with a salt mined off chain (script/MineSalt.s.sol), then seed() (owner any time, anyone after START)."
+  "notes": "PLEA (sell-gated token, one Cabal, seasons) on Sepolia (11155111), fast seasons (5h = 18000 s) with the real 33h dead-man (118800 s); plea timings stay real. Six contracts in order; constructors call only contracts deployed earlier in this list. PLEA(owner). CabalGate(plea, Intake, oracle fee asset = test IMD 0x44a1, pool IMD = TestIMD 0x2b69, oracle signer, season seconds, dead-man seconds). Seasons(plea, gate, pool IMD). Laureates(plea). PleaDistributor(plea, owner). PleaLaunch(plea, gate, seasons, laureates, distributor, Uniswap v4 PoolManager, TestIMD, imd/acc Stacker, credit gas, START): its constructor registers the contracts with PLEA (deploy transaction only) and commits to PleaHook's init code. After launch: deployHook(salt, initCode) with a salt mined off chain (script/MineSalt.s.sol), then seed() (owner any time, anyone after START)."
 }
