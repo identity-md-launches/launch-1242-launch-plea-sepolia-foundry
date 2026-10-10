@@ -50,6 +50,10 @@ contract Fixture is Test {
 
     function setTimings() internal virtual {}
 
+    function creditGasBudget() internal pure virtual returns (uint256) {
+        return CREDIT_GAS;
+    }
+
     /// @dev Default: past the 90-minute launch window (no extra fee, no buy cap).
     function afterSeed() internal virtual {
         skip(91 minutes);
@@ -112,7 +116,7 @@ contract Fixture is Test {
             address(pm),
             address(imd),
             address(stacker),
-            CREDIT_GAS,
+            creditGasBudget(),
             T0 + 1 days
         );
     }
@@ -120,7 +124,9 @@ contract Fixture is Test {
     function hookInitCode() internal view returns (bytes memory) {
         return abi.encodePacked(
             type(PleaHook).creationCode,
-            abi.encode(address(pm), address(plea), address(imd), address(stacker), OWNER, address(seasons), CREDIT_GAS)
+            abi.encode(
+                address(pm), address(plea), address(imd), address(stacker), OWNER, address(seasons), creditGasBudget()
+            )
         );
     }
 
