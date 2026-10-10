@@ -30,7 +30,12 @@ contract Deploy is Script {
             vm.envUint("DEADMAN")
         );
         Seasons seasons = new Seasons(
-            address(plea), address(gate), vm.envAddress("IMD"), vm.envUint("BREAK"), vm.envUint("RANSOM_WINDOW"), vm.envUint("WARNING")
+            address(plea),
+            address(gate),
+            vm.envAddress("IMD"),
+            vm.envUint("BREAK"),
+            vm.envUint("RANSOM_WINDOW"),
+            vm.envUint("WARNING")
         );
         Laureates laureates = new Laureates(address(plea));
         PleaDistributor distributor = new PleaDistributor(address(plea), vm.envAddress("OWNER"));

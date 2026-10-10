@@ -29,9 +29,7 @@ contract MineSalt is Script {
         bytes32 salt;
         address hook;
         for (uint256 s;; ++s) {
-            hook = address(
-                uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(launch), bytes32(s), h))))
-            );
+            hook = address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(launch), bytes32(s), h)))));
             if (uint160(hook) & 0x3fff == flags) {
                 salt = bytes32(s);
                 break;

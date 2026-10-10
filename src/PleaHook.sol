@@ -85,8 +85,12 @@ contract PleaHook {
     uint256 public constant KEEPER_TIP = 1e16; // 0.01 IMD
     uint256 public constant TIP_MIN_WORK = 100e18; // a tipped rebalance moves at least 100 IMD
     uint256 public constant TIP_INTERVAL = 1 hours;
-    /// @notice Gas the swap still needs after the Stacker credit returns.
-    uint256 public constant RESERVE = 250_000;
+    /// @notice Gas a swap must still have when it reaches `beforeSwap`, on top of `creditGas`: the
+    /// rest of the swap (fees, cap, checkpoints) plus slack. Checked first, so the minimum a gas
+    /// estimate finds is set here and small state changes before inclusion only eat slack.
+    uint256 public constant SWAP_RESERVE = 1_000_000;
+    /// @notice Gas kept back around the credit itself (63/64 rule, event, plain-IMD fallback).
+    uint256 public constant CREDIT_RESERVE = 60_000;
     uint24 public constant LP_FEE = 0;
     int24 public constant TICK_SPACING = 60;
 
@@ -395,6 +399,7 @@ contract PleaHook {
     {
         _requirePoolManagerAndPool(key);
         if (!seeded) revert NotSeeded();
+        _requireGas(creditGas + SWAP_RESERVE);
         bool buy = params.zeroForOne != pleaIsZero;
         bool exactIn = params.amountSpecified < 0;
         bool alive = _alive();
@@ -587,12 +592,12 @@ contract PleaHook {
 
     // ------------------------------------------------------------------ cashback
 
-    /// @dev No gas-dependent path a wallet's estimate could pick: the trade reverts unless it can
-    /// afford the credit, and only a credit that reverts (e.g. a paused vault) pays plain IMD.
+    /// @dev No gas-dependent path a wallet's estimate could pick: the swap reverts unless it can
+    /// afford the credit (checked in `beforeSwap` and again here), and only a credit that reverts
+    /// (e.g. a paused vault) pays plain IMD.
     function _payCashback(address trader, uint256 amount) internal {
         if (amount == 0) return;
-        uint256 needed = creditGas + RESERVE;
-        if (gasleft() < needed) revert NotEnoughGas(needed, gasleft());
+        _requireGas(creditGas * 64 / 63 + CREDIT_RESERVE);
         totalCashback += amount;
         try stacker.credit{gas: creditGas}(trader, amount) {
             emit CashbackStacked(trader, amount);
@@ -605,6 +610,10 @@ contract PleaHook {
             totalCashback -= amount;
             retainedImd += amount;
         }
+    }
+
+    function _requireGas(uint256 needed) internal view {
+        if (gasleft() < needed) revert NotEnoughGas(needed, gasleft());
     }
 
     // ------------------------------------------------------------------ cap

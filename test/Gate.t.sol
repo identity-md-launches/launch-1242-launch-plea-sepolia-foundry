@@ -299,5 +299,11 @@ contract GateTest is Fixture {
     function deliverOnce(bytes32 rid, OracleAttestation.Attestation memory a) internal returns (bool) {
         return intake.complete(rid, 0, abi.encode(rid, a, sign(a)));
     }
-}
 
+    /// @dev The signer key gains an EIP-7702 delegation (code): its plain signatures still verify.
+    function test_signerWithDelegationCodeStillVerifies() public {
+        vm.etch(SIGNER, hex"ef0100ca11bde05977b3631167028862be2a173976ca11");
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        assertTrue(answer(id, 40));
+    }
+}

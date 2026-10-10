@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title The reasoning oracle's attestation, as a contract reads it
 /// @notice The oracle answers a typed question off chain — a panel of agents reads it, a deployer
@@ -159,9 +160,14 @@ abstract contract OracleAttestationConsumer is EIP712 {
         if (block.timestamp > a.expiresAt) revert AttestationExpired(a.expiresAt);
         // forge-lint: disable-next-line(block-timestamp)
         if (a.issuedAt > block.timestamp + ISSUED_AT_TOLERANCE) revert AttestationNotYetValid(a.issuedAt);
-        if (!SignatureChecker.isValidSignatureNow(oracleSigner, attestationDigest(a), signature)) {
-            revert BadSignature();
-        }
+        // ECDSA first, then ERC-1271: a signer key with an EIP-7702 delegation has code, and
+        // SignatureChecker alone would then skip the plain signature it actually made.
+        bytes32 digest = attestationDigest(a);
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, signature);
+        if (
+            (err != ECDSA.RecoverError.NoError || recovered != oracleSigner)
+                && !SignatureChecker.isValidERC1271SignatureNow(oracleSigner, digest, signature)
+        ) revert BadSignature();
     }
 
     /// @notice Marks a request id as acted on, once.
