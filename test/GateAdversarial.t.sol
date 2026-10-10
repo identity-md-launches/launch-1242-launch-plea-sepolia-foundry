@@ -50,13 +50,25 @@ contract GateAdversarialTest is SepoliaFixture {
     function test_approvedWindowOnlyClearsAfterTheLastSecond() public {
         uint256 id = plead(alice, 1e18);
         assertTrue(answer(id, 45));
-        vm.warp(uint256(gate.getPlea(id).verdictAt) + 7 minutes);
+        uint256 verdictAt = gate.getPlea(id).verdictAt;
+        vm.warp(verdictAt + 7 minutes);
         vm.prank(alice);
         vm.expectRevert(CabalGate.PendingExists.selector);
         gate.submitSell(1e18, "another plea");
         vm.warp(vm.getBlockTimestamp() + 1);
+        uint256 feeBalance = oimd.balanceOf(alice);
+        vm.expectRevert(abi.encodeWithSelector(CabalGate.Cooldown.selector, verdictAt + 4 hours));
+        plead(alice, 1e18);
+        assertEq(gate.pendingOf(alice), id, "failed submission must roll back stale clearing");
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Approved));
+        assertEq(oimd.balanceOf(alice), feeBalance);
+        vm.prank(alice);
+        vm.expectRevert(CabalGate.WindowLapsed.selector);
+        gate.executeSell(0);
+        vm.warp(verdictAt + 4 hours);
         uint256 next = plead(alice, 1e18);
         assertEq(gate.pendingOf(alice), next);
+        assertEq(gate.lastLapsedAt(alice), verdictAt);
         assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Lapsed));
         (,, bool approved,) = gate.result(id);
         assertTrue(approved, "lapsed approvals still earn season points");

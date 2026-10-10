@@ -6,6 +6,8 @@ import {PLEA} from "src/PLEA.sol";
 import {Seasons} from "src/Seasons.sol";
 import {Laureates} from "src/Laureates.sol";
 import {PleaDistributor} from "src/PleaDistributor.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {Currency} from "v4-core/types/Currency.sol";
 import {MockIMD} from "./utils/Mocks.sol";
 import {SeasonResults, SeasonWallSink, SeasonModel} from "./utils/SeasonModel.sol";
 
@@ -15,6 +17,7 @@ contract SeasonHandler is Test {
     SeasonResults public results;
     SeasonWallSink public wall;
     MockIMD public imd;
+    IPoolManager public pm;
     address[12] public actors;
     SeasonModel.Approval[] internal approvals;
     mapping(uint256 => bytes32) public frozenRankings;
@@ -23,6 +26,11 @@ contract SeasonHandler is Test {
     uint256 public flushed;
     uint256 public minted;
     uint256 public closes;
+    // Input-derived ghost ledger: a late close may spend only its own funding and prior leftovers.
+    mapping(uint256 => uint256) public funding;
+    uint256 public unobserved;
+    uint256 public expectedRollover;
+    uint256 public claimFunded;
 
     constructor(
         Seasons seasons_,
@@ -30,6 +38,7 @@ contract SeasonHandler is Test {
         SeasonResults results_,
         SeasonWallSink wall_,
         MockIMD imd_,
+        IPoolManager pm_,
         address[12] memory actors_
     ) {
         seasons = seasons_;
@@ -37,6 +46,7 @@ contract SeasonHandler is Test {
         results = results_;
         wall = wall_;
         imd = imd_;
+        pm = pm_;
         actors = actors_;
     }
 
@@ -63,10 +73,55 @@ contract SeasonHandler is Test {
     }
 
     function donate(uint256 raw) external {
+        _donate(raw);
+        checkpoint();
+    }
+
+    function donateWithoutCheckpoint(uint256 raw) external {
+        _donate(raw);
+    }
+
+    function _donate(uint256 raw) internal {
         uint256 amount = bound(raw, 0, 1_000_000e18);
         imd.mint(address(this), amount);
         imd.transfer(address(seasons), amount);
         funded += amount;
+        unobserved += amount;
+    }
+
+    function donateClaims(uint256 raw) external {
+        uint256 amount = bound(raw, 0, 1_000_000e18);
+        imd.mint(address(this), amount);
+        pm.unlock(abi.encode(amount));
+        funded += amount;
+        claimFunded += amount;
+        unobserved += amount;
+        _observeFunding();
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        require(msg.sender == address(pm), "manager only");
+        uint256 amount = abi.decode(data, (uint256));
+        pm.mint(address(seasons), uint256(uint160(address(imd))), amount);
+        // Exercise the hook's ordering: allocate/checkpoint claims before their cash settles.
+        seasons.checkpoint();
+        pm.sync(Currency.wrap(address(imd)));
+        imd.transfer(address(pm), amount);
+        pm.settle();
+        return "";
+    }
+
+    function checkpoint() public {
+        seasons.checkpoint();
+        _observeFunding();
+    }
+
+    function _observeFunding() internal {
+        uint256 observedAt = results.diedAt() == 0 ? vm.getBlockTimestamp() : results.diedAt() - 1;
+        uint256 season = (observedAt - results.startedAt()) / 18000;
+        if (season < closes) expectedRollover += unobserved;
+        else funding[season] += unobserved;
+        unobserved = 0;
     }
 
     function closeOldest() external {
@@ -84,12 +139,14 @@ contract SeasonHandler is Test {
         for (uint256 i; i < 12; ++i) {
             before[i] = imd.balanceOf(actors[i]);
         }
-        uint256 pot = imd.balanceOf(address(seasons));
+        uint256 pot = seasons.pot();
+        _observeFunding(); // close also observes donations, in the running/final season
+        uint256 budget = funding[season] + expectedRollover;
         uint256[10] memory percentages = [uint256(25), 18, 14, 11, 9, 7, 6, 4, 3, 3];
         seasons.closeSeason(new uint256[](0));
         uint256 expectedPaid;
         for (uint256 i; i < 12; ++i) {
-            uint256 payout = i < 10 && ranking[i].points >= 60 ? pot * percentages[i] / 100 : 0;
+            uint256 payout = i < 10 && ranking[i].points >= 60 ? budget * percentages[i] / 100 : 0;
             assertEq(
                 imd.balanceOf(actors[ranking[i].actor]),
                 before[ranking[i].actor] + payout,
@@ -98,6 +155,9 @@ contract SeasonHandler is Test {
             expectedPaid += payout;
         }
         assertEq(imd.balanceOf(address(seasons)), pot - expectedPaid);
+        assertEq(pm.balanceOf(address(seasons), uint256(uint160(address(imd)))), 0);
+        funding[season] = 0;
+        expectedRollover = budget - expectedPaid;
         paid += expectedPaid;
         uint256 winners = n < 5 ? n : 5;
         for (uint256 i; i < winners; ++i) {
@@ -119,8 +179,9 @@ contract SeasonHandler is Test {
 
     function endCabal() external {
         if (results.diedAt() == 0) {
-            // A real gate cannot die before it begins. Avoid an empty lifetime in this model.
-            if (vm.getBlockTimestamp() == results.startedAt()) vm.warp(vm.getBlockTimestamp() + 1);
+            // A real dead-man transition requires time to pass: live fees/verdicts cannot occur
+            // at the death timestamp. In particular, do not invent a live season at that boundary.
+            vm.warp(vm.getBlockTimestamp() + 1);
             results.die();
         }
     }
@@ -131,11 +192,29 @@ contract SeasonHandler is Test {
             seasons.flushToWall();
             return;
         }
-        uint256 pot = imd.balanceOf(address(seasons));
+        uint256 pot = seasons.pot();
         seasons.flushToWall();
+        _observeFunding();
+        expectedRollover = 0;
         flushed += pot;
         assertEq(imd.balanceOf(address(seasons)), 0);
         assertEq(imd.allowance(address(seasons), address(wall)), 0);
+    }
+
+    function assertFunding() external view {
+        uint256 total = unobserved + expectedRollover;
+        uint256 current = (vm.getBlockTimestamp() - results.startedAt()) / 18000;
+        for (uint256 season; season <= current; ++season) {
+            assertEq(seasons.seasonFees(season), funding[season], "fees moved between seasons");
+            total += funding[season];
+        }
+        assertEq(seasons.rollover(), expectedRollover, "only unpaid shares may roll forward");
+        assertEq(seasons.pot(), total, "every asset belongs to a bucket or awaits observation");
+        assertEq(
+            imd.balanceOf(address(pm)),
+            pm.balanceOf(address(seasons), uint256(uint160(address(imd)))),
+            "claims retain exact cash backing across redemptions"
+        );
     }
 
     function transferLaureate(uint256 tokenSeed, uint256 recipientSeed) external {
@@ -203,11 +282,12 @@ contract SeasonInvariantTest is Test {
         PleaDistributor drop = new PleaDistributor(address(token), address(this));
         wall = new SeasonWallSink(imd);
         token.setLauncher(address(results), address(seasons), address(laureates), address(drop));
-        token.init(address(wall), makeAddr("unused season pool manager"));
+        IPoolManager pm = IPoolManager(deployCode("PoolManager.sol:PoolManager", abi.encode(address(this))));
+        token.init(address(wall), address(pm));
         for (uint256 i; i < 12; ++i) {
             actors[i] = makeAddr(string.concat("season actor ", vm.toString(i)));
         }
-        handler = new SeasonHandler(seasons, laureates, results, wall, imd, actors);
+        handler = new SeasonHandler(seasons, laureates, results, wall, imd, pm, actors);
         // Start with a contested, payable leaderboard. Later actions add and record in any order.
         for (uint256 i; i < 12; ++i) {
             handler.approvePlea(i, 45, true);
@@ -215,7 +295,7 @@ contract SeasonInvariantTest is Test {
         }
         handler.donate(10_000e18);
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](8);
+        bytes4[] memory selectors = new bytes4[](11);
         selectors[0] = handler.approvePlea.selector;
         selectors[1] = handler.record.selector;
         selectors[2] = handler.donate.selector;
@@ -224,6 +304,9 @@ contract SeasonInvariantTest is Test {
         selectors[5] = handler.endCabal.selector;
         selectors[6] = handler.flush.selector;
         selectors[7] = handler.transferLaureate.selector;
+        selectors[8] = handler.donateClaims.selector;
+        selectors[9] = handler.donateWithoutCheckpoint.selector;
+        selectors[10] = handler.checkpoint.selector;
         targetSelector(FuzzSelector(address(handler), selectors));
     }
 
@@ -238,6 +321,7 @@ contract SeasonInvariantTest is Test {
         assertEq(balances + imd.balanceOf(address(wall)) + seasons.pot(), handler.funded());
         assertEq(imd.totalSupply(), handler.funded());
         assertEq(seasons.nextToClose(), handler.closes());
+        handler.assertFunding();
     }
 
     function invariant_nftsRemainUniqueAndOwnedAfterRandomTransfers() public view {
@@ -262,10 +346,13 @@ contract SeasonInvariantTest is Test {
     function test_modelCoversPayableClosesRolloverAndFinalFlush() public {
         handler.advance(5 hours);
         handler.advance(1 hours);
+        handler.donateClaims(20_000e18);
         handler.closeOldest();
         assertEq(handler.closes(), 1);
         assertEq(handler.minted(), 5);
         assertGt(handler.paid(), 0);
+        assertEq(seasons.seasonFees(1), 20_000e18, "future fees survive the earlier payout");
+        invariant_prizeMoneyIsPaidOnceOrRemainsInThePotOrWall();
         handler.approvePlea(0, 45, false);
         handler.record(24);
         handler.endCabal();
@@ -278,5 +365,29 @@ contract SeasonInvariantTest is Test {
         invariant_prizeMoneyIsPaidOnceOrRemainsInThePotOrWall();
         invariant_nftsRemainUniqueAndOwnedAfterRandomTransfers();
         invariant_rankingsMatchAllRecordedApprovalsAndClosedSeasonsNeverChange();
+    }
+
+    function test_modelCoversDelayedDonationsAndPostFlushClaims() public {
+        handler.donateWithoutCheckpoint(123e18);
+        handler.advance(5 hours);
+        handler.checkpoint();
+        assertEq(seasons.seasonFees(0), 10_000e18);
+        assertEq(seasons.seasonFees(1), 123e18);
+        handler.checkpoint(); // observing the same assets twice must not create revenue
+        handler.advance(1);
+        handler.endCabal();
+        handler.advance(1 hours);
+        handler.closeOldest();
+        handler.closeOldest();
+        handler.flush();
+        handler.donateClaims(456e18);
+        assertEq(seasons.rollover(), 456e18);
+        invariant_prizeMoneyIsPaidOnceOrRemainsInThePotOrWall();
+        handler.flush();
+        uint256 flushed = handler.flushed();
+        handler.flush();
+        assertEq(handler.flushed(), flushed);
+        assertGt(handler.claimFunded(), 0);
+        invariant_prizeMoneyIsPaidOnceOrRemainsInThePotOrWall();
     }
 }

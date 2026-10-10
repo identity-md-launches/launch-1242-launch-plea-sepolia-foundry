@@ -55,7 +55,8 @@ contract SeasonAdversarialTest is Test {
         PleaDistributor drop = new PleaDistributor(address(token), address(this));
         wall = new SeasonWallSink(quote);
         token.setLauncher(address(results), address(seasons), address(laureates), address(drop));
-        token.init(address(wall), makeAddr("unused prize pool"));
+        // Seasons now includes redeemable IMD claims in its assets, so its manager must be live.
+        token.init(address(wall), deployCode("PoolManager.sol:PoolManager", abi.encode(address(this))));
     }
 
     function approve(uint256 id, address seller, uint8 score) internal {
@@ -91,6 +92,7 @@ contract SeasonAdversarialTest is Test {
         uint256[] memory ids = new uint256[](5);
         (ids[0], ids[1], ids[2], ids[3], ids[4]) = (1, 1, 3, 999, 2);
         quote.mint(address(seasons), 100e18);
+        seasons.checkpoint();
         ready();
         seasons.closeSeason(ids);
         assertEq(quote.balanceOf(alice), 25e18);
@@ -131,6 +133,7 @@ contract SeasonAdversarialTest is Test {
             ids[i] = i + 1;
         }
         quote.mint(address(seasons), 100e18);
+        seasons.checkpoint();
         quote.blockRecipient(alice, falseReturn);
         vm.warp(uint256(results.startedAt()) + 18000);
         results.die(); // no season starts at the exact death boundary
@@ -154,6 +157,7 @@ contract SeasonAdversarialTest is Test {
     function testFuzz_prizeRoundingConservesAnOddSizedPot(uint256 rawPot) public {
         uint256 pot = bound(rawPot, 1, 1_000_000_000e18);
         quote.mint(address(seasons), pot);
+        seasons.checkpoint();
         uint256[] memory ids = new uint256[](20);
         address[10] memory actors;
         for (uint256 i; i < 10; ++i) {
@@ -185,6 +189,7 @@ contract SeasonAdversarialTest is Test {
             ids[i] = i + 1;
         }
         quote.mint(address(seasons), 100e18);
+        seasons.checkpoint();
         ready();
         seasons.closeSeason(ids);
         assertEq(quote.balanceOf(alice), 0);

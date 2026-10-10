@@ -6,6 +6,8 @@ import {PLEA} from "src/PLEA.sol";
 import {CabalGate} from "src/CabalGate.sol";
 import {PleaHook} from "src/PleaHook.sol";
 import {OracleAttestation} from "src/OracleAttestation.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {Currency} from "v4-core/types/Currency.sol";
 import {SepoliaFixture} from "./utils/SepoliaFixture.sol";
 import {MockIMD, MockSIMD, MockIntake, BuyRouter} from "./utils/Mocks.sol";
 
@@ -23,6 +25,8 @@ contract TradingHandler is Test {
     uint256 private signerKey;
     uint256 public donations;
     uint256 public plainCashback;
+    uint256 public redeemedCashback;
+    uint256 public redemptionCalls;
     uint256 public buyCalls;
     uint256 public sellCalls;
     uint256 public verdictCalls;
@@ -71,11 +75,12 @@ contract TradingHandler is Test {
         if (available < 1e12) return;
         uint256 amount = bound(raw, 1e12, available < 200e18 ? available : 200e18);
         uint256 cashbackBefore = hook.totalCashback();
+        uint256 claimsBefore = quoteClaims(actor);
         vm.prank(actor);
         uint256 received = router.buyExactIn(amount, abi.encode(actor));
         assertGt(received, 0, "a funded buy must deliver tokens");
         ++buyCalls;
-        afterTrade(cashbackBefore);
+        afterTrade(actor, cashbackBefore, claimsBefore);
     }
 
     function submit(uint256 actorSeed, uint256 raw) external {
@@ -84,6 +89,7 @@ contract TradingHandler is Test {
         if (
             vm.getBlockTimestamp() < gate.lastExecutedAt(actor) + 4 hours
                 || vm.getBlockTimestamp() < gate.lastDeniedAt(actor) + 4 hours
+                || vm.getBlockTimestamp() < gate.lastLapsedAt(actor) + 4 hours
         ) return;
         uint256 pending = gate.pendingOf(actor);
         if (pending != 0) {
@@ -92,6 +98,14 @@ contract TradingHandler is Test {
                 (,,, bool completed) = intake.requests(p.intakeId);
                 if (vm.getBlockTimestamp() <= uint256(p.submittedAt) + 20 minutes && !completed) return;
             } else if (vm.getBlockTimestamp() <= uint256(p.verdictAt) + 7 minutes) {
+                return;
+            } else if (vm.getBlockTimestamp() < uint256(p.verdictAt) + 4 hours) {
+                uint256 feeBefore = feeAsset.balanceOf(actor);
+                vm.expectRevert(abi.encodeWithSelector(CabalGate.Cooldown.selector, uint256(p.verdictAt) + 4 hours));
+                vm.prank(actor);
+                gate.submitSell(1, "The expired approval cannot shorten my cooldown.");
+                assertEq(gate.pendingOf(actor), pending);
+                assertEq(feeAsset.balanceOf(actor), feeBefore);
                 return;
             }
         }
@@ -163,18 +177,19 @@ contract TradingHandler is Test {
         if (p.status != CabalGate.Status.Approved || vm.getBlockTimestamp() > uint256(p.verdictAt) + 7 minutes) return;
         if (token.balanceOf(actor) < p.amount) return;
         uint256 cashbackBefore = hook.totalCashback();
+        uint256 claimsBefore = quoteClaims(actor);
         uint256 balanceBefore = token.balanceOf(actor);
         uint256 quoteBefore = imd.balanceOf(actor);
         vm.prank(actor);
         uint256 out = gate.executeSell(0);
         // With minOut=0 a dust sell may legitimately round its quote output to zero.
-        uint256 plain = simd.paused() ? hook.totalCashback() - cashbackBefore : 0;
+        uint256 plain = simd.paused() ? hook.totalCashback() - cashbackBefore - (quoteClaims(actor) - claimsBefore) : 0;
         assertEq(imd.balanceOf(actor), quoteBefore + out + plain);
         assertEq(token.balanceOf(actor), balanceBefore - p.amount);
         assertEq(gate.pendingOf(actor), 0);
         assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Executed));
         ++sellCalls;
-        afterTrade(cashbackBefore);
+        afterTrade(actor, cashbackBefore, claimsBefore);
     }
 
     function freeSell(uint256 actorSeed, uint256 raw, bool sellAll) external {
@@ -184,10 +199,41 @@ contract TradingHandler is Test {
         if (balance < 1e12) return;
         uint256 amount = sellAll ? balance : bound(raw, 1e12, balance);
         uint256 cashbackBefore = hook.totalCashback();
+        uint256 claimsBefore = quoteClaims(actor);
         vm.prank(actor);
         router.sellExactIn(amount, abi.encode(actor));
         ++sellCalls;
-        afterTrade(cashbackBefore);
+        afterTrade(actor, cashbackBefore, claimsBefore);
+    }
+
+    function quoteClaims(address who) public view returns (uint256) {
+        return hook.poolManager().balanceOf(who, uint256(uint160(address(imd))));
+    }
+
+    function redeemClaims(uint256 actorSeed, uint256 raw) external {
+        bool isOwner = actorSeed % 4 == 3;
+        address holder = isOwner ? token.owner() : actors[actorSeed % 3];
+        uint256 available = quoteClaims(holder);
+        if (available == 0) return;
+        uint256 amount = bound(raw, 1, available);
+        IPoolManager pm = hook.poolManager();
+        vm.prank(holder);
+        pm.approve(address(this), uint256(uint160(address(imd))), amount);
+        uint256 before = imd.balanceOf(holder);
+        pm.unlock(abi.encode(holder, amount));
+        assertEq(imd.balanceOf(holder), before + amount);
+        assertEq(quoteClaims(holder), available - amount);
+        if (!isOwner) redeemedCashback += amount;
+        ++redemptionCalls;
+    }
+
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        IPoolManager pm = hook.poolManager();
+        require(msg.sender == address(pm), "manager only");
+        (address holder, uint256 amount) = abi.decode(data, (address, uint256));
+        pm.burn(holder, uint256(uint160(address(imd))), amount);
+        pm.take(Currency.wrap(address(imd)), holder, amount);
+        return "";
     }
 
     function fundWall(uint256 actorSeed, uint256 raw) external {
@@ -231,8 +277,11 @@ contract TradingHandler is Test {
         dead = !gate.cabalAlive();
     }
 
-    function afterTrade(uint256 cashbackBefore) internal {
-        if (simd.paused()) plainCashback += hook.totalCashback() - cashbackBefore;
+    function afterTrade(address actor, uint256 cashbackBefore, uint256 claimsBefore) internal {
+        // Claim payouts do not call Stacker, including when it is paused. Count only actual cash here.
+        if (simd.paused()) {
+            plainCashback += hook.totalCashback() - cashbackBefore - (quoteClaims(actor) - claimsBefore);
+        }
         uint256 cap = hook.inventoryCap();
         assertLe(cap, previousCap, "cap can only ratchet down");
         assertGe(cap, 900_000e18);
@@ -248,11 +297,13 @@ contract TradingInvariantTest is SepoliaFixture {
     TradingHandler internal handler;
     uint256 internal seedBurn;
     uint256 internal initialCap;
+    uint256 internal decayStart;
 
     function setUp() public virtual override {
         super.setUp();
         seedBurn = plea.TOTAL_SUPPLY() - plea.totalSupply();
         initialCap = hook.inventoryCap();
+        decayStart = hook.lastCapDecayAt();
         handler = new TradingHandler(
             TradingHandler.Environment({
                 token: plea,
@@ -269,7 +320,7 @@ contract TradingInvariantTest is SepoliaFixture {
             })
         );
         targetContract(address(handler));
-        bytes4[] memory selectors = new bytes4[](10);
+        bytes4[] memory selectors = new bytes4[](11);
         selectors[0] = handler.buy.selector;
         selectors[1] = handler.submit.selector;
         selectors[2] = handler.verdict.selector;
@@ -280,6 +331,7 @@ contract TradingInvariantTest is SepoliaFixture {
         selectors[7] = handler.rebalance.selector;
         selectors[8] = handler.pauseCashback.selector;
         selectors[9] = handler.advance.selector;
+        selectors[10] = handler.redeemClaims.selector;
         targetSelector(FuzzSelector(address(handler), selectors));
     }
 
@@ -301,29 +353,38 @@ contract TradingInvariantTest is SepoliaFixture {
             + imd.balanceOf(address(stacker)) + imd.balanceOf(OWNER) + imd.balanceOf(keeper);
         uint256 oracleSum = oimd.balanceOf(intake.PAY_TO());
         uint256 stacked;
+        uint256 cashbackClaims;
         for (uint256 i; i < users.length; ++i) {
             sum += imd.balanceOf(users[i]);
             oracleSum += oimd.balanceOf(users[i]);
             stacked += simd.balanceOf(users[i]);
+            cashbackClaims += handler.quoteClaims(users[i]);
         }
         assertEq(sum, imd.totalSupply());
         assertEq(oracleSum, oimd.totalSupply());
         assertEq(imd.balanceOf(address(gate)), 0);
         assertEq(oimd.balanceOf(address(gate)), 0);
-        assertEq(imd.balanceOf(OWNER), hook.totalOwnerFees());
-        assertEq(imd.balanceOf(address(seasons)), hook.totalPrize());
+        assertEq(imd.balanceOf(OWNER) + handler.quoteClaims(OWNER), hook.totalOwnerFees());
+        assertEq(seasons.pot(), hook.totalPrize());
         assertEq(imd.balanceOf(address(stacker)), simd.totalSupply());
         assertEq(stacked, simd.totalSupply());
-        assertEq(stacked + handler.plainCashback(), hook.totalCashback());
+        assertEq(stacked + handler.plainCashback() + cashbackClaims + handler.redeemedCashback(), hook.totalCashback());
     }
 
     function invariant_wallReservesClaimsAndGateStateRemainBacked() public view {
         assertEq(imd.balanceOf(address(hook)), hook.retainedImd() + handler.donations());
         assertEq(pm.balanceOf(address(hook), uint256(uint160(address(imd)))), hook.retainClaims());
-        assertGe(imd.balanceOf(address(pm)), hook.retainClaims());
+        uint256 allClaims = hook.retainClaims() + handler.quoteClaims(OWNER) + handler.quoteClaims(address(seasons));
+        for (uint256 i; i < users.length; ++i) {
+            allClaims += handler.quoteClaims(users[i]);
+        }
+        assertGe(imd.balanceOf(address(pm)), allClaims, "pool cash backs every claim beneficiary");
         assertLe(hook.inventoryCap(), initialCap);
-        // The stricter elapsed-time decay bound has a separate reproduced finding; see the
-        // audit report. Conservation and monotonicity remain independently testable here.
+        uint256 used = initialCap - hook.inventoryCap();
+        assertLe(used * 1 days, hook.CAP_DECAY_PER_DAY() * (vm.getBlockTimestamp() - decayStart));
+        assertEq(
+            used * 1 days, hook.CAP_DECAY_PER_DAY() * (hook.lastCapDecayAt() - decayStart) + hook.capDecayRemainder()
+        );
         for (uint256 i; i < users.length; ++i) {
             assertEq(
                 pm.balanceOf(users[i], uint256(uint160(address(plea)))), 0, "restricted buys must not leak PLEA claims"
@@ -357,6 +418,26 @@ contract TradingInvariantTest is SepoliaFixture {
         assertGt(handler.verdictCalls(), 0);
         assertGt(handler.rebalanceCalls(), 0);
         assertTrue(handler.dead());
+        invariant_allPleaIsAccountedForAndSupplyOnlyFallsByActualBurns();
+        invariant_quoteConservationAndFeePaymentsMatchTheirCounters();
+        invariant_wallReservesClaimsAndGateStateRemainBacked();
+    }
+
+    function testFuzz_handlerAccountsForClaimFeesAndTheirRedemption(bool paused) public {
+        handler.buy(0, 1e12);
+        handler.pauseCashback(paused);
+        handler.buy(1, 200e18); // its fees exceed the cash left by the first tiny buy
+        assertGt(handler.quoteClaims(OWNER), 0);
+        assertGt(handler.quoteClaims(bob), 0);
+        assertGt(handler.quoteClaims(address(seasons)), 0);
+        invariant_quoteConservationAndFeePaymentsMatchTheirCounters();
+        invariant_wallReservesClaimsAndGateStateRemainBacked();
+        handler.redeemClaims(3, handler.quoteClaims(OWNER));
+        handler.redeemClaims(1, handler.quoteClaims(bob));
+        assertEq(handler.redemptionCalls(), 2);
+        assertEq(handler.quoteClaims(OWNER), 0);
+        assertEq(handler.quoteClaims(bob), 0);
+        assertGt(handler.redeemedCashback(), 0);
         invariant_allPleaIsAccountedForAndSupplyOnlyFallsByActualBurns();
         invariant_quoteConservationAndFeePaymentsMatchTheirCounters();
         invariant_wallReservesClaimsAndGateStateRemainBacked();
