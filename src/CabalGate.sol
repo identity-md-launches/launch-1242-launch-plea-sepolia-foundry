@@ -387,6 +387,7 @@ contract CabalGate is OracleAttestationConsumer {
             revert TooLate();
         }
         _verifyAttestation(a, signature);
+        _consume(a.requestId);
         if (a.chainId != QUESTION_CHAIN || a.panelSize < PANEL_SIZE || a.quorum < QUORUM || a.agreed < QUORUM) {
             revert WrongPanel();
         }

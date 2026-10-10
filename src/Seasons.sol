@@ -30,7 +30,7 @@ contract Seasons {
     struct Entry {
         address wallet;
         uint16 points;
-        uint64 pleaId; // the plea that last raised the total (ties go to the earlier one)
+        uint64 pleaId; // newest of the counted best three pleas (ties go to the earlier one)
     }
 
     struct PleaEntry {
@@ -53,6 +53,7 @@ contract Seasons {
     mapping(uint256 => Entry[10]) internal _top;
     mapping(uint256 => PleaEntry[5]) internal _topPleas;
     mapping(uint256 => mapping(address => uint8[3])) internal _best;
+    mapping(uint256 => mapping(address => uint64[3])) internal _bestPleaIds;
     mapping(uint256 => bool) public closed;
     mapping(uint256 => bool) public recorded;
     /// @notice The oldest season not yet closed (season 0 starts when trading opens).
@@ -133,14 +134,21 @@ contract Seasons {
         recorded[pleaId] = true;
         _insertPlea(season, uint64(pleaId), score);
         uint8[3] storage b = _best[season][seller];
+        uint64[3] storage ids = _bestPleaIds[season][seller];
         uint256 mi;
-        if (b[1] < b[mi]) mi = 1;
-        if (b[2] < b[mi]) mi = 2;
+        // Replace the lowest score, or the newest plea among equal lowest scores.
+        for (uint256 i = 1; i < 3; ++i) {
+            if (b[i] < b[mi] || (b[i] == b[mi] && ids[i] > ids[mi])) mi = i;
+        }
         uint16 pts;
-        if (score > b[mi]) {
+        if (score > b[mi] || (score == b[mi] && pleaId < ids[mi])) {
             b[mi] = score;
+            ids[mi] = uint64(pleaId);
             pts = uint16(uint256(b[0]) + b[1] + b[2]);
-            _insertWallet(season, Entry({wallet: seller, points: pts, pleaId: uint64(pleaId)}));
+            uint64 newest = ids[0];
+            if (ids[1] > newest) newest = ids[1];
+            if (ids[2] > newest) newest = ids[2];
+            _insertWallet(season, Entry({wallet: seller, points: pts, pleaId: newest}));
         }
         emit Recorded(pleaId, season, seller, score, pts);
     }
@@ -179,17 +187,22 @@ contract Seasons {
         PleaEntry[5] storage t = _topPleas[season];
         PleaEntry[5] memory m = t;
         uint256 n = LAUREATES_PER_SEASON;
-        // A newer plea needs a strictly higher score to pass an older one.
-        if (m[n - 1].pleaId != 0 && score <= m[n - 1].score) return;
+        PleaEntry memory ne = PleaEntry({pleaId: pleaId, score: score});
+        if (!_betterPlea(ne, m[n - 1])) return;
         uint256 i = n - 1;
-        while (i > 0 && (m[i - 1].pleaId == 0 || score > m[i - 1].score)) {
+        while (i > 0 && _betterPlea(ne, m[i - 1])) {
             m[i] = m[i - 1];
             --i;
         }
-        m[i] = PleaEntry({pleaId: pleaId, score: score});
+        m[i] = ne;
         for (uint256 k = i; k < n; ++k) {
             t[k] = m[k];
         }
+    }
+
+    function _betterPlea(PleaEntry memory a, PleaEntry memory b) internal pure returns (bool) {
+        if (b.pleaId == 0) return true;
+        return a.score > b.score || (a.score == b.score && a.pleaId < b.pleaId);
     }
 
     // ================================================================ closing
