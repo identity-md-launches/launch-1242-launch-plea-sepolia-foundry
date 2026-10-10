@@ -2,356 +2,302 @@
 pragma solidity 0.8.26;
 
 import {Fixture} from "./utils/Fixture.sol";
-import {OracleAttestation, OracleAttestationConsumer} from "../src/OracleAttestation.sol";
 import {CabalGate} from "../src/CabalGate.sol";
 import {PLEA} from "../src/PLEA.sol";
+import {OracleAttestation} from "../src/OracleAttestation.sol";
+import {MockIntake} from "./utils/Mocks.sol";
 
 contract GateTest is Fixture {
-    string constant TEXT = "Dear Cabal, I bought early and held through the dip; I need 10% for my sister's wedding.";
-
     function setUp() public virtual override {
         super.setUp();
-        skip(91 minutes);
-        vm.roll(vm.getBlockNumber() + 450);
-        buy(alice, 10e18); // ~1.7M PLEA at the 5,700 IMD cap
-        buy(bob, 5e18);
+        buy(alice, 50e18);
+        buy(bob, 50e18);
     }
 
-    function _submit(address who, uint256 amount) internal returns (uint256 id) {
-        vm.prank(who);
-        id = gate.submitSell(amount, TEXT);
+    function test_pleaPaysTheIntakeAndNamesTheCallback() public {
+        uint256 before = oimd.balanceOf(alice);
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        assertEq(oimd.balanceOf(alice), before - 0.5e18);
+        assertEq(oimd.balanceOf(intake.PAY_TO()), 0.5e18);
+        assertEq(oimd.balanceOf(address(gate)), 0);
+        bytes32 rid = intakeIdOf(id);
+        (address payer, address target, bytes4 sel, bool done) = intake.requests(rid);
+        assertEq(payer, address(gate));
+        assertEq(target, address(gate));
+        assertEq(sel, bytes4(0x510379c7));
+        assertFalse(done);
+        assertEq(gate.pleaOfIntake(rid), id);
     }
 
-    function test_submitTakesFeeAndEmitsBody() public {
-        uint256 bal = plea.balanceOf(alice);
-        uint256 imdBefore = imd.balanceOf(alice);
-        uint256 id = _submit(alice, bal / 10);
-        assertEq(imd.balanceOf(alice), imdBefore - 0.5e18);
-        assertEq(imd.balanceOf(address(gate)), 0.5e18);
-        CabalGate.Plea memory p = gate.getPlea(id);
-        assertEq(uint8(p.status), uint8(CabalGate.Status.Pending));
-        assertEq(p.need, 70 - p.factScore);
-        assertEq(gate.pendingOf(alice), id);
-        string memory b = gate.body(id);
-        assertTrue(bytes(b).length > 500);
-        assertTrue(_contains(b, '"consumer":{"chainId":11155111,"address":"'));
-        assertTrue(_contains(b, "[PLEA]Dear Cabal"));
-        assertTrue(_contains(b, '"panelSize":30,"quorum":20,"validForSeconds":3600,"allowAmbiguous":true'));
-        string memory c = gate.canonical(id, 1, 2);
-        assertTrue(_contains(c, '{"answerType":"bool","chainId":1,"definitions":{"facts":"'));
-        assertTrue(_contains(c, '","v":1,"window":{"fromBlock":1,"toBlock":2}}'));
-    }
-
-    function test_factScoreComponents() public {
-        uint256 bal = plea.balanceOf(alice);
-        // just bought: share <=15% -> 18, held < 1 day -> 0, 24h unknown -> 5, P/L from the basis
-        uint8 pl = _plPoints(alice);
-        assertEq(gate.factScore(alice, bal / 10), 18 + 5 + pl);
-        assertEq(gate.factScore(alice, bal / 5), 11 + 5 + pl);
-        assertEq(gate.factScore(alice, bal * 35 / 100), 5 + 5 + pl);
-        skip(1 days);
-        assertEq(gate.factScore(alice, bal / 10), 18 + 5 + 5 + pl);
-        skip(2 days);
-        assertEq(gate.factScore(alice, bal / 10), 18 + 9 + 5 + pl);
-        skip(4 days);
-        assertEq(gate.factScore(alice, bal / 10), 18 + 14 + 5 + pl);
-        // a 24h-old checkpoint that is lower than now -> price up -> 9 instead of 5
-        imd.mint(bob, 100_000e18);
-        buy(bob, 1e18);
-        skip(25 hours);
-        nextBlock();
-        buy(bob, 5_000e18); // pumps the price: alice now in profit (>200%?) and 24h up
-        uint8 s = gate.factScore(alice, bal / 10);
-        assertEq(s, 18 + 14 + 9 + _plPoints(alice));
-        assertLe(s, 55);
-    }
-
-    function _plPoints(address who) internal view returns (uint8) {
-        (uint256 spent, uint256 held) = hook.costBasis(who);
-        uint256 value = held * hook.priceX96() / (1 << 96);
-        if (value < spent) return 14;
-        uint256 g = (value - spent) * 100 / spent;
-        if (g <= 50) return 9;
-        if (g <= 200) return 5;
-        return 0;
-    }
-
-    function test_submitRejectsBadText() public {
-        uint256 amt = plea.balanceOf(alice) / 10;
-        string[8] memory bad = [
-            "",
-            "contains [PLEA] marker",
-            "contains [/plea marker",
-            "tab\there",
-            unicode"zero​width",
-            "soft\xc2\xadhyphen",
-            unicode"bom﻿",
-            "trailing newline\n"
-        ];
-        for (uint256 i; i < bad.length; ++i) {
-            vm.prank(alice);
-            vm.expectRevert(CabalGate.BadPleaText.selector);
-            gate.submitSell(amt, bad[i]);
+    function test_bodyIsTheNumericPanelQuestion() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10, 'I "quote" and \\ escape');
+        string memory body = string(intake.bodyOf(intakeIdOf(id)));
+        assertEq(body, gate.body(id));
+        assertEq(vm.parseJsonString(body, ".answerType"), "uint256");
+        assertEq(vm.parseJsonString(body, ".evidence"), "panel");
+        assertEq(vm.parseJsonUint(body, ".panelSize"), 30);
+        assertEq(vm.parseJsonUint(body, ".quorum"), 17);
+        assertEq(vm.parseJsonUint(body, ".toleranceBps"), 1500);
+        assertEq(vm.parseJsonString(body, ".guards.max"), "45");
+        assertEq(vm.parseJsonUint(body, ".consumer.chainId"), 11155111);
+        assertEq(vm.parseJsonAddress(body, ".consumer.verifyingContract"), address(gate));
+        string memory q = vm.parseJsonString(body, ".question");
+        assertEq(q, gate.question(id));
+        assertTrue(bytes(q).length <= 2000);
+        // The classic definitions, each within IMD's 512-character limit.
+        string[] memory keys = vm.parseJsonKeys(body, ".definitions");
+        assertEq(keys.length, 3);
+        for (uint256 i; i < keys.length; ++i) {
+            string memory v = vm.parseJsonString(body, string.concat(".definitions.", keys[i]));
+            assertLe(bytes(v).length, 512, keys[i]);
         }
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.BadPleaText.selector);
-        gate.submitSell(amt, string(abi.encodePacked("bidi", hex"e280ae", "override")));
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.BadPleaText.selector);
-        gate.submitSell(amt, string(abi.encodePacked("bad utf8 ", hex"c3")));
-        bytes memory long = new bytes(281);
-        for (uint256 i; i < 281; ++i) {
-            long[i] = "a";
+    }
+
+    function test_allMoodDefinitionsFitImdLimits() public view {
+        for (uint8 m; m < 4; ++m) {
+            string memory json = string.concat("{", moodBook.definitions(m), "}");
+            string[] memory keys = vm.parseJsonKeys(json, "$");
+            assertGt(keys.length, 2);
+            for (uint256 i; i < keys.length; ++i) {
+                string memory v = vm.parseJsonString(json, string.concat(".", keys[i]));
+                assertLe(bytes(v).length, 512, keys[i]);
+                assertGt(bytes(v).length, 0);
+            }
+            assertLt(bytes(moodBook.intro(m)).length, 300);
         }
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.BadPleaText.selector);
-        gate.submitSell(amt, string(long));
-        // 280 bytes of valid UTF-8 (incl. multibyte) is fine, as are quotes and backslashes (escaped)
-        vm.prank(alice);
-        uint256 id = gate.submitSell(amt, unicode"Plé \"quoted\" back\\slash ünïcode ✓");
-        assertTrue(_contains(gate.question(id), 'Pl\xc3\xa9 \\"quoted\\" back\\\\slash'));
     }
 
-    function test_submitRejectsBadAmounts() public {
-        uint256 bal = plea.balanceOf(alice);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.AmountTooLarge.selector);
-        gate.submitSell(bal * 36 / 100, TEXT);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.AmountTooLarge.selector);
-        gate.submitSell(0, TEXT);
-        imd.mint(alice, 10_000_000e18);
-        buy(alice, 200e18);
-        assertGt(plea.balanceOf(alice), uint256(2_500_000e18) * 10_000 / 3_500);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.AmountTooLarge.selector);
-        gate.submitSell(2_500_001e18, TEXT);
-        _submit(alice, 2_500_000e18);
-    }
-
-    function test_onePendingPerWallet() public {
-        _submit(alice, 1e18);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.PendingExists.selector);
-        gate.submitSell(1e18, TEXT);
-    }
-
-    function test_approveExecuteWithinWindowAndCooldown() public {
+    function test_approvedScoreOpensTheSellWindow() public {
         uint256 amount = plea.balanceOf(alice) / 10;
-        uint256 id = _submit(alice, amount);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.NotApproved.selector);
-        gate.executeSell(0);
-        deliver(id, true);
-        skip(7 minutes);
+        uint256 id = plead(alice, amount);
+        CabalGate.Plea memory p = gate.getPlea(id);
+        assertEq(p.factScore, gate.factScore(alice, amount));
+        assertEq(p.need, 70 - p.factScore);
+        uint8 need = p.need;
+        assertTrue(answer(id, need));
+        p = gate.getPlea(id);
+        assertEq(uint8(p.status), uint8(CabalGate.Status.Approved));
+        assertEq(p.score, need);
+        assertEq(gate.lastVerdictAt(), vm.getBlockTimestamp());
         uint256 imdBefore = imd.balanceOf(alice);
         vm.prank(alice);
         uint256 out = gate.executeSell(1);
         assertGt(out, 0);
         assertEq(imd.balanceOf(alice), imdBefore + out);
         assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Executed));
-        // 4h cooldown after an executed sell
-        vm.prank(alice);
-        vm.expectRevert();
-        gate.submitSell(1e18, TEXT);
-        skip(4 hours);
-        _submit(alice, 1e18);
     }
 
-    function test_slippageGuard() public {
-        uint256 id = _submit(alice, plea.balanceOf(alice) / 10);
-        deliver(id, true);
-        vm.prank(alice);
+    function test_scoreBelowNeedDenies() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        assertTrue(answer(id, gate.getPlea(id).need - 1));
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Denied));
+        assertEq(gate.pendingOf(alice), 0);
         vm.expectRevert();
-        gate.executeSell(type(uint256).max);
+        plead(alice, 1e18);
+        vm.prank(alice);
+        vm.expectRevert(CabalGate.NotApproved.selector);
+        gate.executeSell(0);
     }
 
-    function test_lapsedApprovalLetsPleadAgain() public {
-        uint256 id = _submit(alice, 1e18);
-        deliver(id, true);
+    function test_sellWindowLapses() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        answer(id, 40);
         skip(7 minutes + 1);
         vm.prank(alice);
         vm.expectRevert(CabalGate.WindowLapsed.selector);
         gate.executeSell(0);
-        uint256 id2 = _submit(alice, 1e18); // clears the lapsed one
+        skip(4 hours);
+        plead(alice, 1e18); // the lapsed plea is cleared
         assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Lapsed));
-        assertEq(gate.pendingOf(alice), id2);
     }
 
-    function test_deniedThenAppealOnce() public {
-        uint256 id = _submit(alice, 1e18);
-        deliver(id, false);
-        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Denied));
+    function test_appealWithinFourHoursForNoMore() public {
+        uint256 amount = plea.balanceOf(alice) / 10;
+        uint256 id = plead(alice, amount);
+        answer(id, 10);
+        uint256 wallBefore = hook.retainedImd();
         vm.prank(alice);
-        vm.expectRevert();
-        gate.submitSell(1e18, TEXT); // 4h wait
+        vm.expectRevert(CabalGate.AmountTooLarge.selector);
+        gate.appeal(id, amount + 1, "please");
         vm.prank(alice);
-        vm.expectRevert(); // the appeal waits out the same 4h as a new plea
-        gate.appeal(id, "I was too brief. Here is my whole heart: I hold, I believe, I need rent.");
-        skip(4 hours);
-        uint256 retainedBefore = hook.retainedImd();
-        uint256 imdBefore = imd.balanceOf(alice);
+        uint256 a = gate.appeal(id, amount / 2, "Reconsider: I mis-spoke, and I halve my ask.");
+        assertEq(hook.retainedImd(), wallBefore + 0.35e18);
+        CabalGate.Plea memory p = gate.getPlea(a);
+        assertTrue(p.isAppeal);
+        assertEq(p.originalId, id);
+        assertTrue(gate.getPlea(id).appealed);
+        string memory q = gate.question(a);
+        assertTrue(vm.contains(q, "This is an APPEAL of plea #1"));
+        answer(a, 45);
         vm.prank(alice);
-        uint256 appealId = gate.appeal(id, "I was too brief. Here is my whole heart: I hold, I believe, I need rent.");
-        assertEq(imd.balanceOf(alice), imdBefore - 0.85e18);
-        assertEq(hook.retainedImd() - retainedBefore, 0.35e18);
-        assertEq(imd.balanceOf(address(gate)), 0.5e18 + 0.5e18);
-        string memory q = gate.question(appealId);
-        assertTrue(_contains(q, "APPEAL"));
-        assertTrue(_contains(q, "DENIED"));
-        assertTrue(_contains(q, "[PLEA]Dear Cabal"));
+        gate.executeSell(1);
+    }
+
+    function test_appealClosesAfterFourHoursAndOnlyOnce() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        answer(id, 0);
+        skip(4 hours + 1);
         vm.prank(alice);
+        vm.expectRevert(CabalGate.AppealClosed.selector);
+        gate.appeal(id, 1e18, "late");
+
+        uint256 id2 = plead(bob, plea.balanceOf(bob) / 10);
+        answer(id2, 0);
+        vm.prank(bob);
+        uint256 a = gate.appeal(id2, 1e18, "first");
+        answer(a, 0);
+        vm.prank(bob);
         vm.expectRevert(CabalGate.AlreadyAppealed.selector);
-        gate.appeal(id, "again");
-        deliver(appealId, true);
-        vm.prank(alice);
-        gate.executeSell(0);
-        // an appeal cannot itself be appealed
-        uint256 id3;
-        skip(4 hours);
-        id3 = _submit(alice, 1e18);
-        deliver(id3, false);
-        skip(4 hours);
-        vm.prank(alice);
-        uint256 a3 = gate.appeal(id3, "please");
-        deliver(a3, false);
-        vm.prank(alice);
+        gate.appeal(id2, 1e18, "second");
+        vm.prank(bob);
         vm.expectRevert(CabalGate.AlreadyAppealed.selector);
-        gate.appeal(a3, "please again");
+        gate.appeal(a, 1e18, "appeal of an appeal");
     }
 
-    function _copy(OracleAttestation.Attestation memory a)
-        internal
-        pure
-        returns (OracleAttestation.Attestation memory)
-    {
-        return abi.decode(abi.encode(a), (OracleAttestation.Attestation));
+    function test_cannotPassIsRefusedBeforePaying() public {
+        uint256 amount = plea.balanceOf(alice) * 28 / 100; // share 5, hold 0, P/L, 24h 5
+        uint256 need = 70 - gate.factScore(alice, amount);
+        assertGt(need, 45);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(CabalGate.CannotPass.selector, need));
+        gate.submitSell(amount, "x", 0, new bytes32[](0));
     }
 
-    function test_verdictRejectsBadAttestations() public {
-        uint256 id = _submit(alice, 1e18);
-        OracleAttestation.Attestation memory a = attestationFor(id, true, keccak256("r1"));
+    function test_callbackOnlyFromIntakeAndOnlyForAPendingPlea() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        OracleAttestation.Attestation memory a = attestation(40, keccak256("r"));
         bytes memory sig = sign(a);
-        // wrong signer
+        bytes32 rid = intakeIdOf(id);
+        vm.expectRevert(CabalGate.NotIntake.selector);
+        gate.onOracleResult(rid, a, sig);
+        // An attacker pays the Intake for their own body naming the gate's callback: unknown id.
+        vm.startPrank(alice);
+        oimd.approve(address(intake), 1e18);
+        bytes32 rogue =
+            intake.request(bytes32(0), "{}", MockIntake.Callback(address(gate), 0x510379c7), address(oimd), 0.5e18);
+        vm.stopPrank();
+        assertFalse(intake.complete(rogue, 0, abi.encode(rogue, a, sig)));
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Pending));
+    }
+
+    function test_badAttestationsAreNotDelivered() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        bytes32 rid = intakeIdOf(id);
+        OracleAttestation.Attestation memory a = attestation(40, keccak256("r"));
+        a.agreed = 16;
+        assertFalse(deliverOnce(rid, a));
+    }
+
+    function test_scoreAboveRangeOrWrongTypeIsRefused() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        OracleAttestation.Attestation memory a = attestation(46, keccak256("r"));
+        assertFalse(deliver(intakeIdOf(id), a));
+        uint256 id2 = plead(bob, plea.balanceOf(bob) / 10);
+        a = attestation(40, keccak256("r2"));
+        a.answerType = OracleAttestation.ANSWER_BOOL;
+        a.answer = abi.encode(true);
+        assertFalse(deliver(intakeIdOf(id2), a));
+    }
+
+    function test_wrongSignerIsRefused() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        OracleAttestation.Attestation memory a = attestation(40, keccak256("r"));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xBEEF, gate.attestationDigest(a));
-        vm.expectRevert(OracleAttestationConsumer.BadSignature.selector);
-        gate.deliverVerdict(id, a, abi.encodePacked(r, s, v));
-        // tampered answer under the original signature
-        OracleAttestation.Attestation memory t = _copy(a);
-        t.answer = abi.encode(false);
-        vm.expectRevert(OracleAttestationConsumer.BadSignature.selector);
-        gate.deliverVerdict(id, t, sig);
-        // wrong question hash
-        t = _copy(a);
-        t.questionHash = keccak256("other");
-        bytes memory s2 = sign(t);
-        vm.expectRevert(CabalGate.QuestionMismatch.selector);
-        gate.deliverVerdict(id, t, s2);
-        // small panel / too few agreed
-        t = _copy(a);
-        t.panelSize = 5;
-        s2 = sign(t);
-        vm.expectRevert(CabalGate.WrongPanel.selector);
-        gate.deliverVerdict(id, t, s2);
-        t = _copy(a);
-        t.agreed = 19;
-        s2 = sign(t);
-        vm.expectRevert(CabalGate.WrongPanel.selector);
-        gate.deliverVerdict(id, t, s2);
-        // expired
-        t = _copy(a);
-        t.expiresAt = uint64(vm.getBlockTimestamp() - 1);
-        s2 = sign(t);
-        vm.expectRevert(abi.encodeWithSelector(OracleAttestationConsumer.AttestationExpired.selector, t.expiresAt));
-        gate.deliverVerdict(id, t, s2);
-        // wrong answer type
-        t = _copy(a);
-        t.answerType = OracleAttestation.ANSWER_UINT256;
-        t.answer = abi.encode(uint256(1));
-        s2 = sign(t);
-        vm.expectRevert();
-        gate.deliverVerdict(id, t, s2);
-        // the good one, delivered under the 200k stipend, then replayed
-        gate.deliverVerdict{gas: 200_000}(id, a, sig);
-        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Approved));
-        vm.expectRevert(CabalGate.NotPending.selector);
-        gate.deliverVerdict(id, a, sig);
-        uint256 id2 = _submit(bob, 1e18);
-        OracleAttestation.Attestation memory b = attestationFor(id2, true, keccak256("r1")); // same requestId
-        s2 = sign(b);
-        vm.expectRevert(abi.encodeWithSelector(OracleAttestationConsumer.AlreadyConsumed.selector, keccak256("r1")));
-        gate.deliverVerdict(id2, b, s2);
+        bytes32 rid = intakeIdOf(id);
+        assertFalse(intake.complete(rid, 0, abi.encode(rid, a, abi.encodePacked(r, s, v))));
     }
 
-    function test_cancelUnansweredPlea() public {
-        uint256 id = _submit(alice, 1e18);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.NotMatured.selector);
-        gate.cancel(id);
-        skip(3 hours);
-        vm.prank(alice);
-        gate.cancel(id);
-        assertEq(gate.pendingOf(alice), 0);
-        _submit(alice, 1e18);
+    function test_noVerdictIsClearedAtOnceWhenTheIntakeCompletes() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        vm.expectRevert(CabalGate.NotStale.selector);
+        gate.expire(id);
+        intake.complete(intakeIdOf(id), 2, ""); // the panel disagreed: no callback
+        gate.expire(id);
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Expired));
+        plead(alice, 1e18); // may plead again, no cooldown
     }
 
-    function test_deadManSwitch() public {
-        vm.expectRevert();
-        gate.killCabal();
-        uint256 id = _submit(alice, 1e18);
-        skip(47 hours);
-        deliver(id, false); // resets the clock
-        skip(47 hours);
-        vm.expectRevert();
-        gate.killCabal();
-        skip(1 hours + 1);
-        gate.killCabal();
-        assertTrue(plea.cabalDead());
-        vm.prank(alice);
-        plea.transfer(bob, 1e18);
-        // PLEA.killCabal is gate-only
-        vm.expectRevert(PLEA.NotGate.selector);
-        plea.killCabal();
+    function test_pendingExpiresAfterTwentyMinutesAndLateCallbacksFail() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        skip(20 minutes + 1);
+        assertFalse(answer(id, 45));
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Pending));
+        uint256 id2 = plead(alice, 1e18); // clears the expired one
+        assertEq(uint8(gate.getPlea(id).status), uint8(CabalGate.Status.Expired));
+        assertGt(id2, id);
     }
 
-    function test_ownerPowers() public {
+    function test_onePendingPleaPerWallet() public {
+        plead(alice, 1e18);
         vm.prank(alice);
-        vm.expectRevert(CabalGate.NotOwner.selector);
-        gate.withdrawImd(alice, 1);
-        _submit(alice, 1e18);
-        vm.prank(OWNER);
-        gate.withdrawImd(OWNER, 0.5e18);
-        assertEq(imd.balanceOf(OWNER), 0.5e18);
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.NotOwner.selector);
-        gate.setSigner(alice);
-        vm.prank(OWNER);
-        gate.setSigner(ORACLE_SIGNER);
-        assertEq(gate.oracleSigner(), ORACLE_SIGNER);
-        // PLEA allowlist is owner-only and add-only
-        vm.prank(alice);
-        vm.expectRevert();
-        plea.allow(alice);
-        vm.prank(OWNER);
-        plea.allow(alice);
-        vm.prank(alice);
-        plea.transfer(bob, 1e18);
+        vm.expectRevert(CabalGate.PendingExists.selector);
+        gate.submitSell(1e18, "again", 0, new bytes32[](0));
     }
 
-    function _contains(string memory hay, string memory needle) internal pure returns (bool) {
-        bytes memory h = bytes(hay);
-        bytes memory n = bytes(needle);
-        if (n.length > h.length) return false;
-        for (uint256 i; i + n.length <= h.length; ++i) {
-            bool ok = true;
-            for (uint256 j; j < n.length; ++j) {
-                if (h[i + j] != n[j]) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) return true;
+    function test_cooldownAfterExecutedSell() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        answer(id, 45);
+        vm.prank(alice);
+        gate.executeSell(1);
+        vm.prank(alice);
+        vm.expectRevert();
+        gate.submitSell(1e18, "again", 0, new bytes32[](0));
+        skip(4 hours);
+        plead(alice, 1e18);
+    }
+
+    function test_claimsRefusedOutsideRekt() public {
+        bytes32[] memory txs = new bytes32[](1);
+        txs[0] = keccak256("tx");
+        vm.prank(alice);
+        vm.expectRevert(CabalGate.BadClaim.selector);
+        gate.submitSell(1e18, "rekt", 1, txs);
+    }
+
+    function test_textFilter() public {
+        string[9] memory bad = [
+            "",
+            "line\nbreak",
+            string(hex"7a65726fe2808b7769647468"), // U+200B
+            string(hex"62696469e280ae"), // U+202E
+            string(hex"78e281a678"), // U+2066
+            string(hex"78efb88f"), // U+FE0F
+            string(hex"78f3a08181"), // U+E0041 tag
+            "fake [plea] marker",
+            "close [/PLEA marker"
+        ];
+        for (uint256 i; i < bad.length; ++i) {
+            vm.prank(alice);
+            vm.expectRevert(CabalGate.BadPleaText.selector);
+            gate.submitSell(1e18, bad[i], 0, new bytes32[](0));
         }
-        return false;
+        vm.prank(alice);
+        vm.expectRevert(CabalGate.BadPleaText.selector);
+        gate.submitSell(1e18, string(new bytes(281)), 0, new bytes32[](0));
+        plead(alice, 1e18, unicode"Arabic سلام and ✓ are fine");
+    }
+
+    function test_callbackFitsTheStipend() public {
+        uint256 id = plead(alice, plea.balanceOf(alice) / 10);
+        assertTrue(answer(id, 40));
+        emit log_named_uint("approve callback gas", intake.lastCallbackGasUsed());
+        assertLt(intake.lastCallbackGasUsed(), 120_000);
+        uint256 id2 = plead(bob, plea.balanceOf(bob) / 10);
+        assertTrue(answer(id2, 1));
+        emit log_named_uint("deny callback gas", intake.lastCallbackGasUsed());
+        assertLt(intake.lastCallbackGasUsed(), 120_000);
+    }
+
+    function test_noPleasWhileTheCabalSleeps() public {
+        skip(33 hours);
+        assertFalse(gate.cabalAlive());
+        vm.prank(alice);
+        vm.expectRevert(CabalGate.CabalNotWatching.selector);
+        gate.submitSell(1e18, "x", 0, new bytes32[](0));
+    }
+
+    function deliverOnce(bytes32 rid, OracleAttestation.Attestation memory a) internal returns (bool) {
+        return intake.complete(rid, 0, abi.encode(rid, a, sign(a)));
     }
 }
+

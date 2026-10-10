@@ -3,9 +3,13 @@ pragma solidity 0.8.26;
 
 /*
   PleaHook — a fork of POOL4's CappedBurnHook (Ethereum 0xc6c965bd164c483e87d0b550671798e9a3602840),
-  converted to the IMD side: the quote asset is TestIMD (an ERC-20) instead of ETH, the pool is
-  PLEA/IMD with LP fee 0, the hook is the only LP, liquidity is locked forever (no closeMarket, no
-  withdraw), trims burn 100% and recovered IMD becomes an IMD-only buy wall below the price.
+  converted to the IMD side: the quote asset is IMD (an ERC-20) instead of ETH, the pool is PLEA/IMD
+  with LP fee 0, the hook is the only LP, liquidity is locked forever (no closeMarket, no withdraw),
+  trims burn 100% and recovered IMD becomes an IMD-only buy wall below the price.
+
+  v10: every fee is paid in the swap that earns it (no claims to settle later): 0.5% cashback to the
+  trader as sIMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the season's prize pot,
+  0.25% to pool liquidity, and 0.25% of the PLEA leg burned.
 */
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -24,17 +28,12 @@ import {PoolId} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IStacker} from "./interfaces/IStacker.sol";
-
-interface IPLEAForHook {
-    function cabalDead() external view returns (bool);
-    function gate() external view returns (address);
-    function burn(uint256 amount) external;
-}
+import {IPLEA} from "./interfaces/IPleaParts.sol";
 
 contract PleaHook {
     using StateLibrary for IPoolManager;
 
-    error NotPlea();
+    error NotLauncher();
     error NotPoolManager();
     error InvalidPool();
     error AlreadySeeded();
@@ -50,27 +49,29 @@ contract PleaHook {
     error InvalidLiquidity();
     error ExactOutputBuyRefused();
     error RecipientRequired();
+    error NotEnoughGas(uint256 needed, uint256 left);
 
     event Seeded(uint160 sqrtPriceX96, int24 tick, uint128 liquidity, uint256 pleaDeposited);
-    event SeedDeferred();
-    event FeesTaken(address indexed trader, bool buy, uint256 imdBasis, uint256 imdFee, uint256 pleaFee);
+    event FeesTaken(
+        address indexed trader, bool buy, uint256 imdBasis, uint256 imdFee, uint256 pleaBurned, uint256 toPrize
+    );
+    event PayoutsToPool(uint256 amount);
     event FeeRefunded(address indexed trader, address currency, uint256 amount, bool asClaims);
     event CashbackStacked(address indexed trader, uint256 amount);
     event CashbackPaidPlain(address indexed trader, uint256 amount);
-    event CashbackOwed(address indexed trader, uint256 amount);
     event CapRatcheted(uint256 previousCap, uint256 newCap);
     event Trimmed(uint128 liquidityRemoved, uint256 pleaBurned, uint256 imdRetained);
     event WallDeployed(int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 imdDeployed);
     event WallSettled(uint128 liquidity, uint256 pleaBurned, uint256 imdReturned);
-    event ClaimsSettled(uint256 pleaBurned, uint256 imdRetained, uint256 imdToOwner, uint256 imdToCashback);
     event KeeperTipPaid(address indexed keeper, uint256 amount);
     event PriceCheckpoint(uint64 hour, uint256 priceX96);
 
     uint256 public constant BPS = 10_000;
-    uint256 public constant CASHBACK_BPS = 50; // 0.5% of the IMD fill, to the trader
+    uint256 public constant CASHBACK_BPS = 50; // 0.5% of the IMD fill, to the trader as sIMD
     uint256 public constant OWNER_BPS = 50; // 0.5% to the owner
+    uint256 public constant PRIZE_BPS = 25; // 0.25% to the season's prize pot
     uint256 public constant POOL_BPS = 25; // 0.25% to pool liquidity (the wall)
-    uint256 public constant IMD_FEE_BPS = CASHBACK_BPS + OWNER_BPS + POOL_BPS;
+    uint256 public constant IMD_FEE_BPS = CASHBACK_BPS + OWNER_BPS + PRIZE_BPS + POOL_BPS;
     uint256 public constant PLEA_BURN_BPS = 25; // 0.25% of the PLEA leg burned every trade
     uint256 public constant LAUNCH_WINDOW = 90 minutes;
     uint256 public constant LAUNCH_EXTRA_BPS = 7_000; // 70% -> 0% linear, to pool liquidity
@@ -81,16 +82,15 @@ contract PleaHook {
     uint256 public constant MIN_TRIM = 1e18;
     uint256 public constant WALL_THRESHOLD = 1e18; // retained IMD worth a rebalance
     uint256 public constant WALL_MIN_FILL = 1_000e18; // PLEA bought by the wall worth a settle
-    uint256 public constant KEEPER_TIP = 1e16; // 0.01 IMD per useful rebalance/settle
-    /// @notice IMD value a tipped call must have settled or redeployed: dust work earns no tip.
-    uint256 public constant TIP_MIN_WORK = 1e17;
-    /// @notice Gas kept back from the Stacker credit so the fallback and the rest of the swap fit.
+    uint256 public constant KEEPER_TIP = 1e16; // 0.01 IMD
+    uint256 public constant TIP_MIN_WORK = 100e18; // a tipped rebalance moves at least 100 IMD
+    uint256 public constant TIP_INTERVAL = 1 hours;
+    /// @notice Gas the swap still needs after the Stacker credit returns.
     uint256 public constant RESERVE = 250_000;
     uint24 public constant LP_FEE = 0;
     int24 public constant TICK_SPACING = 60;
 
     uint8 private constant ACTION_SEED = 1;
-    uint8 private constant ACTION_SETTLE = 2;
     uint8 private constant ACTION_REBALANCE = 3;
 
     uint256 private constant T_TRADER = 0x01;
@@ -102,6 +102,12 @@ contract PleaHook {
     IERC20 public immutable imd;
     IStacker public immutable stacker;
     address public immutable owner;
+    /// @notice Seasons: receives the 0.25% prize fee.
+    address public immutable seasons;
+    /// @notice Gas given to each Stacker credit. A trade that cannot afford it reverts
+    /// `NotEnoughGas`, so a gas estimate always includes the credit (Sepolia: a first credit
+    /// costs about 1.2M).
+    uint256 public immutable creditGas;
     bool public immutable pleaIsZero;
     int24 public immutable minTick;
     int24 public immutable maxTick;
@@ -112,9 +118,11 @@ contract PleaHook {
         uint128 liquidity;
     }
 
+    /// @notice Per-trader cost basis and the buy-weighted average time of their buys.
     struct Basis {
         uint256 imdSpent;
         uint256 pleaHeld;
+        uint256 avgBuyTime;
     }
 
     struct Checkpoint {
@@ -123,44 +131,49 @@ contract PleaHook {
     }
 
     bool public seeded;
-    bool public seedDeferred;
     uint256 public launchedAt;
     Band public market;
     Band public wall;
     uint256 public inventoryCap;
     uint256 public lastCapDecayAt;
     uint256 public capDecayRemainder;
+    /// @notice Wall reserve held as IMD by the hook.
     uint256 public retainedImd;
-    uint256 public cashbackFloat;
+    /// @notice Wall reserve held as ERC-6909 IMD claims (redeemed by `rebalance`).
+    uint256 public retainClaims;
     uint256 public totalBurned;
     uint256 public totalOwnerFees;
     uint256 public totalCashback;
+    uint256 public totalPrize;
     uint256 public totalPoolFees;
     int24 public refTick;
     int24 private curBlockTick;
     uint64 private refBlock;
     int24 private constant MAX_REF_STEP = 200;
-
-    uint256 public pleaBurnClaims;
-    uint256 public imdRetainClaims;
-    uint256 public imdOwnerClaims;
-    uint256 public imdCashbackClaims;
-    uint256 public lastClaimBlock;
-    uint256 public lastTipBlock;
+    uint256 public lastTipAt;
     /// @notice IMD the current wall was deployed with (what it has spent so far is `wallImd - imdInWall`).
     uint256 public wallImd;
     bool private callbackExpected;
 
     mapping(address => Basis) public basisOf;
-    mapping(address => uint256) public cashbackOwed;
     Checkpoint[25] public ring;
 
-    constructor(IPoolManager poolManager_, address plea_, IERC20 imd_, IStacker stacker_, address owner_) {
+    constructor(
+        IPoolManager poolManager_,
+        address plea_,
+        IERC20 imd_,
+        IStacker stacker_,
+        address owner_,
+        address seasons_,
+        uint256 creditGas_
+    ) {
         poolManager = poolManager_;
         plea = plea_;
         imd = imd_;
         stacker = stacker_;
         owner = owner_;
+        seasons = seasons_;
+        creditGas = creditGas_;
         pleaIsZero = plea_ < address(imd_);
         minTick = TickMath.minUsableTick(TICK_SPACING);
         maxTick = TickMath.maxUsableTick(TICK_SPACING);
@@ -188,12 +201,6 @@ contract PleaHook {
         });
     }
 
-    /// @notice The flag bits a PleaHook address must carry in its low 14 bits.
-    function requiredFlags() public pure returns (uint160) {
-        return Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
-            | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
-    }
-
     function poolKey() public view returns (PoolKey memory key) {
         (Currency c0, Currency c1) = pleaIsZero
             ? (Currency.wrap(plea), Currency.wrap(address(imd)))
@@ -215,7 +222,7 @@ contract PleaHook {
         (, tick,,) = poolManager.getSlot0(poolId());
     }
 
-    /// @notice IMD per PLEA, scaled by 2^96.
+    /// @notice Spot IMD per PLEA, scaled by 2^96. Fact scores never use it (see `latestPrice`).
     function priceX96() public view returns (uint256) {
         return _priceX96(currentSqrtPriceX96());
     }
@@ -228,11 +235,22 @@ contract PleaHook {
         return FullMath.mulDiv(FixedPoint96.Q96, FixedPoint96.Q96, p);
     }
 
+    /// @notice The most recent hourly checkpoint (the price at the first trade of that hour).
+    function latestPrice() public view returns (uint256 best) {
+        uint64 bestHour;
+        for (uint256 i; i < 25; ++i) {
+            Checkpoint memory c = ring[i];
+            if (c.priceX96 != 0 && c.hour >= bestHour) {
+                bestHour = c.hour;
+                best = c.priceX96;
+            }
+        }
+    }
+
     /// @notice The checkpointed price from at least 24 hours ago (0 when none is old enough).
-    function price24hAgo() public view returns (uint256) {
+    function price24hAgo() public view returns (uint256 best) {
         uint64 target = uint64(block.timestamp / 1 hours) - 24;
         uint64 bestHour;
-        uint256 best;
         for (uint256 i; i < 25; ++i) {
             Checkpoint memory c = ring[i];
             if (c.priceX96 != 0 && c.hour <= target && c.hour >= bestHour) {
@@ -240,12 +258,6 @@ contract PleaHook {
                 best = c.priceX96;
             }
         }
-        return best;
-    }
-
-    function costBasis(address trader) external view returns (uint256 imdSpent, uint256 pleaHeld) {
-        Basis memory b = basisOf[trader];
-        return (b.imdSpent, b.pleaHeld);
     }
 
     /// @notice Extra buy fee in bps during the launch window: 70% at seed, 0% after 90 minutes.
@@ -276,7 +288,7 @@ contract PleaHook {
 
     function pendingRebalance() public view returns (bool) {
         if (!seeded) return false;
-        return retainedImd >= WALL_THRESHOLD || pleaInWall() >= WALL_MIN_FILL;
+        return retainedImd + retainClaims >= WALL_THRESHOLD || pleaInWall() >= WALL_MIN_FILL;
     }
 
     function _pleaIn(Band memory b, uint160 sqrtP) internal view returns (uint256) {
@@ -307,21 +319,17 @@ contract PleaHook {
         return SqrtPriceMath.getAmount0Delta(sqrtP, hi, b.liquidity, false);
     }
 
+    function _alive() internal view returns (bool) {
+        return IPLEA(plea).restricted();
+    }
+
     // ------------------------------------------------------------------ seed
 
     /// @notice Creates the PLEA/IMD pool at a 5,700 IMD market cap with the hook's whole PLEA
-    /// balance as the only liquidity. Called by PLEA.init in the deploy transaction. If the
-    /// PoolManager has no code (the launch's empty-chain rehearsal) seeding is deferred and the
-    /// owner may call it once the chain is real.
+    /// balance as the only liquidity. Once, through PleaLaunch.seed (owner any time, anyone after START).
     function seed() external {
+        if (msg.sender != IPLEA(plea).launcher()) revert NotLauncher();
         if (seeded) revert AlreadySeeded();
-        if (msg.sender != plea && !(seedDeferred && msg.sender == owner)) revert NotPlea();
-        if (address(poolManager).code.length == 0) {
-            seedDeferred = true;
-            emit SeedDeferred();
-            return;
-        }
-        seedDeferred = false;
         seeded = true;
         uint256 pleaAmount = IERC20(plea).balanceOf(address(this));
         // sqrt(IMD/PLEA ratio) in the pool's token1/token0 orientation.
@@ -355,15 +363,10 @@ contract PleaHook {
         refBlock = uint64(block.number);
         // Any PLEA dust the rounding left behind is burned: the hook holds no inventory of its own.
         uint256 dust = IERC20(plea).balanceOf(address(this));
-        if (dust != 0) IPLEAForHook(plea).burn(dust);
-        _approveStacker();
+        if (dust != 0) IPLEA(plea).burn(dust);
+        if (address(stacker).code.length != 0) imd.approve(address(stacker), type(uint256).max);
         _checkpoint(initPrice);
         emit Seeded(initPrice, initTick, liquidity, deposited);
-    }
-
-    function _approveStacker() internal {
-        if (address(stacker).code.length == 0) return;
-        try imd.approve(address(stacker), type(uint256).max) {} catch {}
     }
 
     // ------------------------------------------------------------------ hooks
@@ -384,8 +387,8 @@ contract PleaHook {
         return IHooks.beforeAddLiquidity.selector;
     }
 
-    /// @notice Gates sells, refuses exact-output buys while the Cabal lives and takes the fee on the
-    /// specified currency as a share of the fill (settled against the realised fill in `afterSwap`).
+    /// @notice Gates sells, refuses exact-output buys while the Cabal watches and takes the fee on
+    /// the specified currency as a share of the fill (settled against the realised fill in `afterSwap`).
     function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
         external
         returns (bytes4, BeforeSwapDelta, uint24)
@@ -394,16 +397,14 @@ contract PleaHook {
         if (!seeded) revert NotSeeded();
         bool buy = params.zeroForOne != pleaIsZero;
         bool exactIn = params.amountSpecified < 0;
-        bool alive = !IPLEAForHook(plea).cabalDead();
-        if (!buy && alive && sender != IPLEAForHook(plea).gate()) revert SellsOnlyViaGate();
-        // While the Cabal lives a buyer must never leave the pool with a positive PLEA delta: the
+        bool alive = _alive();
+        if (!buy && alive && sender != IPLEA(plea).gate()) revert SellsOnlyViaGate();
+        // While the Cabal watches a buyer must never leave the pool with a positive PLEA delta: the
         // PoolManager would let it mint ERC-6909 claims and sell them in a hookless pool. Exact-input
         // buys have their whole PLEA output taken by the hook and delivered as ERC-20 in afterSwap; an
         // exact-output buy fixes the swapper's PLEA delta at the requested amount, so it is refused.
         if (buy && !exactIn && alive) revert ExactOutputBuyRefused();
         // The recipient comes from hookData (abi.encode(address)); otherwise it is the swap sender.
-        // A live-Cabal buy delivers ERC-20 PLEA to the recipient, so it must be given explicitly:
-        // delivered to a router it could never leave (PLEA refuses `from == router`).
         address trader;
         if (hookData.length == 32) trader = abi.decode(hookData, (address));
         if (trader == address(0)) {
@@ -429,8 +430,8 @@ contract PleaHook {
     }
 
     /// @notice Settles the specified-side fee against the realised fill (refunding the rest), takes
-    /// the fee on the unspecified currency, delivers the PLEA of an exact-input buy as ERC-20, books
-    /// everything, redeems matured claims, applies the cap, then pays cashback as the very last step.
+    /// the fee on the unspecified currency, delivers the PLEA of an exact-input buy as ERC-20, pays
+    /// every fee, applies the cap, then pays cashback as the very last step.
     function afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         external
         returns (bytes4, int128)
@@ -456,9 +457,6 @@ contract PleaHook {
         uint256 unspecAmt = ud < 0 ? uint256(uint128(-ud)) : uint256(uint128(ud));
         bool specifiedIsImd = buy == exactIn;
 
-        // Claims booked in earlier blocks are redeemed by the first trade of a later block.
-        if (block.number > lastClaimBlock && _hasClaims()) _redeem();
-
         // The specified-side fee was taken on the requested amount; charge it on the fill only.
         uint256 specDue = specAmt * (specifiedIsImd ? _imdRate(buy) : PLEA_BURN_BPS) / BPS;
         if (specDue > specFee) specDue = specFee;
@@ -475,12 +473,12 @@ contract PleaHook {
             if (buy) _checkMaxBuy(unspecAmt);
             pleaFee = unspecAmt * PLEA_BURN_BPS / BPS;
             pleaAmt = unspecAmt;
-            if (buy && !IPLEAForHook(plea).cabalDead()) {
+            if (buy && _alive()) {
                 // Take the whole PLEA output; the trader receives ERC-20 PLEA from the hook's delta.
                 if (unspecAmt - pleaFee != 0) poolManager.take(Currency.wrap(plea), trader, unspecAmt - pleaFee);
                 ret = int128(int256(unspecAmt));
             } else {
-                // Sells, and buys once the Cabal is dead: plain v4 accounting, the hook takes its fee.
+                // Sells, and buys while the Cabal sleeps: plain v4 accounting, the hook takes its fee.
                 ret = int128(int256(pleaFee));
             }
         } else {
@@ -490,24 +488,61 @@ contract PleaHook {
             pleaAmt = specAmt;
             ret = int128(int256(imdFee));
         }
-        _bookFees(imdBasis, imdFee, pleaFee);
+        uint256 cashback = _payFees(trader, buy, imdBasis, imdFee, pleaFee);
         _updateBasis(trader, buy, imdBasis + imdFee, buy ? pleaAmt - pleaFee : pleaAmt + pleaFee);
-        emit FeesTaken(trader, buy, imdBasis, imdFee, pleaFee);
 
         _applyCap();
         _observeTick();
         _checkpoint(currentSqrtPriceX96());
 
-        uint256 cashback = imdBasis * CASHBACK_BPS / BPS;
         _payCashback(trader, cashback);
         return (IHooks.afterSwap.selector, ret);
     }
 
+    /// @dev Pays the fee deltas the hook holds, in this swap: PLEA burned; IMD to the owner, the prize
+    /// pot and the hook (for cashback); the pool share kept as claims for the wall. If the
+    /// PoolManager holds too little IMD to pay out (only possible on the first buy after seeding,
+    /// before any IMD sits in the pool), the payouts go to pool liquidity instead of reverting.
+    /// @return cashback IMD now held by the hook for the trader.
+    function _payFees(address trader, bool buy, uint256 imdBasis, uint256 imdFee, uint256 pleaFee)
+        internal
+        returns (uint256 cashback)
+    {
+        if (pleaFee != 0) {
+            poolManager.take(Currency.wrap(plea), address(this), pleaFee);
+            IPLEA(plea).burn(pleaFee);
+            totalBurned += pleaFee;
+        }
+        uint256 toPrize;
+        if (imdFee != 0) {
+            cashback = imdBasis * CASHBACK_BPS / BPS;
+            uint256 toOwner = imdBasis * OWNER_BPS / BPS;
+            toPrize = imdBasis * PRIZE_BPS / BPS;
+            uint256 out = cashback + toOwner + toPrize;
+            if (imd.balanceOf(address(poolManager)) < out) {
+                emit PayoutsToPool(out);
+                (cashback, toOwner, toPrize, out) = (0, 0, 0, 0);
+            }
+            uint256 toPool = imdFee - out;
+            Currency c = Currency.wrap(address(imd));
+            if (toOwner != 0) poolManager.take(c, owner, toOwner);
+            if (toPrize != 0) poolManager.take(c, seasons, toPrize);
+            if (cashback != 0) poolManager.take(c, address(this), cashback);
+            if (toPool != 0) {
+                poolManager.mint(address(this), _id(address(imd)), toPool);
+                retainClaims += toPool;
+            }
+            totalOwnerFees += toOwner;
+            totalPrize += toPrize;
+            totalPoolFees += toPool;
+        }
+        emit FeesTaken(trader, buy, imdBasis, imdFee, pleaFee, toPrize);
+    }
+
     /// @dev Returns the part of the specified-side fee the fill did not earn. The swapper has not
-    /// settled yet, so the PoolManager may hold less IMD than the refund (nothing right after launch):
-    /// then the refund is minted to the trader as an ERC-6909 IMD claim instead of reverting the trade.
-    /// PLEA refunds (a gate sell) are always ERC-20: the PoolManager holds the pool's PLEA, and a PLEA
-    /// claim in a seller's hands could be sold in a hookless pool.
+    /// settled yet, so the PoolManager may hold less IMD than the refund: then the refund is minted to
+    /// the trader as an ERC-6909 IMD claim instead of reverting the trade. PLEA refunds (a gate sell)
+    /// are always ERC-20: a PLEA claim in a seller's hands could be sold in a hookless pool.
     function _refund(address trader, bool isImd, uint256 amount) internal {
         if (!isImd) {
             poolManager.take(Currency.wrap(plea), trader, amount);
@@ -527,38 +562,22 @@ contract PleaHook {
         }
     }
 
-    /// @dev Converts the fee deltas the hook holds into ERC-6909 claims, split by purpose.
-    function _bookFees(uint256 imdBasis, uint256 imdFee, uint256 pleaFee) internal {
-        if (pleaFee != 0) {
-            poolManager.mint(address(this), _id(plea), pleaFee);
-            pleaBurnClaims += pleaFee;
-            totalBurned += pleaFee;
-        }
-        if (imdFee != 0) {
-            poolManager.mint(address(this), _id(address(imd)), imdFee);
-            uint256 cashback = imdBasis * CASHBACK_BPS / BPS;
-            uint256 toOwner = imdBasis * OWNER_BPS / BPS;
-            uint256 toPool = imdFee - cashback - toOwner;
-            imdCashbackClaims += cashback;
-            imdOwnerClaims += toOwner;
-            imdRetainClaims += toPool;
-            totalOwnerFees += toOwner;
-            totalPoolFees += toPool;
-        }
-        if (pleaFee != 0 || imdFee != 0) lastClaimBlock = block.number;
-    }
-
     /// @dev `grossImd` is what the trader paid or received in IMD including fees; `pleaMoved` is the
     /// PLEA the trader received (buy) or gave up including the burn fee (sell).
     function _updateBasis(address trader, bool buy, uint256 grossImd, uint256 pleaMoved) internal {
         Basis storage b = basisOf[trader];
         if (buy) {
+            uint256 held = b.pleaHeld;
+            if (held + pleaMoved != 0) {
+                b.avgBuyTime = (b.avgBuyTime * held + block.timestamp * pleaMoved) / (held + pleaMoved);
+            }
             b.imdSpent += grossImd;
-            b.pleaHeld += pleaMoved;
+            b.pleaHeld = held + pleaMoved;
         } else {
             if (pleaMoved >= b.pleaHeld) {
                 b.imdSpent = 0;
                 b.pleaHeld = 0;
+                b.avgBuyTime = 0;
             } else {
                 b.imdSpent -= FullMath.mulDiv(b.imdSpent, pleaMoved, b.pleaHeld);
                 b.pleaHeld -= pleaMoved;
@@ -568,45 +587,24 @@ contract PleaHook {
 
     // ------------------------------------------------------------------ cashback
 
-    /// @dev Never reverts the trade. Pays from the real IMD float; if the float is short the amount
-    /// is owed and claimable once `settleClaims` has refilled it.
+    /// @dev No gas-dependent path a wallet's estimate could pick: the trade reverts unless it can
+    /// afford the credit, and only a credit that reverts (e.g. a paused vault) pays plain IMD.
     function _payCashback(address trader, uint256 amount) internal {
         if (amount == 0) return;
-        if (cashbackFloat < amount) {
-            cashbackOwed[trader] += amount;
-            emit CashbackOwed(trader, amount);
-            return;
-        }
-        cashbackFloat -= amount;
-        _deliverCashback(trader, amount);
-    }
-
-    function _deliverCashback(address trader, uint256 amount) internal {
+        uint256 needed = creditGas + RESERVE;
+        if (gasleft() < needed) revert NotEnoughGas(needed, gasleft());
         totalCashback += amount;
-        if (gasleft() > RESERVE) {
-            try stacker.credit{gas: gasleft() - RESERVE}(trader, amount) {
-                emit CashbackStacked(trader, amount);
-                return;
-            } catch {}
-        }
-        (bool ok, bytes memory ret) = address(imd).call(abi.encodeCall(IERC20.transfer, (trader, amount)));
-        if (ok && (ret.length == 0 || abi.decode(ret, (bool)))) {
+        try stacker.credit{gas: creditGas}(trader, amount) {
+            emit CashbackStacked(trader, amount);
+            return;
+        } catch {}
+        (bool ok, bytes memory r) = address(imd).call(abi.encodeCall(IERC20.transfer, (trader, amount)));
+        if (ok && (r.length == 0 || abi.decode(r, (bool)))) {
             emit CashbackPaidPlain(trader, amount);
         } else {
             totalCashback -= amount;
-            cashbackFloat += amount;
-            cashbackOwed[trader] += amount;
-            emit CashbackOwed(trader, amount);
+            retainedImd += amount;
         }
-    }
-
-    /// @notice Pays cashback that could not be paid at trade time, once the float covers it.
-    function claimCashback() external {
-        uint256 owed = cashbackOwed[msg.sender];
-        if (owed == 0 || cashbackFloat < owed) return;
-        cashbackOwed[msg.sender] = 0;
-        cashbackFloat -= owed;
-        _deliverCashback(msg.sender, owed);
     }
 
     // ------------------------------------------------------------------ cap
@@ -639,22 +637,17 @@ contract PleaHook {
         if (toRemove == 0) return;
         (uint256 pleaOut, uint256 imdOut) = _removeLiquidity(m.tickLower, m.tickUpper, toRemove);
         market.liquidity = m.liquidity - uint128(toRemove);
-        _claimTrim(pleaOut, imdOut);
-        if (currentSqrtPriceX96() != priceBefore) revert PriceMoved();
-        emit Trimmed(uint128(toRemove), pleaOut, imdOut);
-    }
-
-    function _claimTrim(uint256 pleaOut, uint256 imdOut) internal {
         if (pleaOut != 0) {
-            poolManager.mint(address(this), _id(plea), pleaOut);
-            pleaBurnClaims += pleaOut;
+            poolManager.take(Currency.wrap(plea), address(this), pleaOut);
+            IPLEA(plea).burn(pleaOut);
             totalBurned += pleaOut;
         }
         if (imdOut != 0) {
             poolManager.mint(address(this), _id(address(imd)), imdOut);
-            imdRetainClaims += imdOut;
+            retainClaims += imdOut;
         }
-        if (pleaOut != 0 || imdOut != 0) lastClaimBlock = block.number;
+        if (currentSqrtPriceX96() != priceBefore) revert PriceMoved();
+        emit Trimmed(uint128(toRemove), pleaOut, imdOut);
     }
 
     function _removeLiquidity(int24 lower, int24 upper, uint256 liquidity)
@@ -673,25 +666,31 @@ contract PleaHook {
 
     // ------------------------------------------------------------------ wall
 
-    /// @notice Permissionless: settles a filled wall (burning the PLEA it bought) and redeploys all
-    /// retained IMD as one IMD-only band just below the price. Pays the caller a tip from retained IMD.
+    /// @notice Permissionless: redeems the pool share's claims, settles a filled wall (burning the
+    /// PLEA it bought) and redeploys all retained IMD as one IMD-only band just below the price. Pays
+    /// the caller 0.01 IMD at most once an hour, and only when the call moved at least 100 IMD.
     function rebalance() external {
-        if (!seeded) revert NotSeeded();
-        uint256 work = _settleMatured();
         if (!pendingRebalance()) revert RebalanceNotNeeded();
-        (uint256 w, bool acted) = abi.decode(_unlock(abi.encode(ACTION_REBALANCE, "")), (uint256, bool));
+        (uint256 work, bool acted) = abi.decode(_unlock(abi.encode(ACTION_REBALANCE, "")), (uint256, bool));
         // Nothing settled, no wall closed and none deployed (the band cannot be placed while the
-        // price sits at a tick extreme): the call did no work and must not be paid for it.
+        // price sits at a tick extreme): the call did no work.
         if (work == 0 && !acted) revert RebalanceNotNeeded();
-        _payTip(msg.sender, work + w);
+        _payTip(msg.sender, work);
     }
 
-    /// @return work IMD value actually handled: what the wall spent buying PLEA plus fresh reserve
-    /// (at least `WALL_THRESHOLD`) that was deployed in this call. Reserve that could not be deployed,
-    /// and wall IMD merely recycled into a new band, count for nothing.
-    /// @return acted Whether a wall was closed or deployed.
+    /// @return work IMD value actually handled: claims redeemed, what the wall spent buying PLEA and
+    /// fresh reserve deployed in this call.
+    /// @return acted Whether a wall was closed or deployed, or claims redeemed.
     function _rebalance() internal returns (uint256 work, bool acted) {
-        uint256 fresh = retainedImd;
+        uint256 claims = retainClaims;
+        if (claims != 0) {
+            retainClaims = 0;
+            poolManager.burn(address(this), _id(address(imd)), claims);
+            poolManager.take(Currency.wrap(address(imd)), address(this), claims);
+            retainedImd += claims;
+            work += claims;
+            acted = true;
+        }
         uint256 deployed = wallImd;
         uint256 back = _closeWall();
         if (deployed != 0) acted = true;
@@ -735,7 +734,7 @@ contract PleaHook {
         wallImd = imdReq;
         if (currentSqrtPriceX96() != priceBefore) revert PriceMoved();
         acted = true;
-        if (fresh >= WALL_THRESHOLD) work += fresh < imdReq ? fresh : imdReq;
+        work += imdReq;
         emit WallDeployed(lower, upper, liquidity, imdReq);
     }
 
@@ -748,7 +747,7 @@ contract PleaHook {
         wallImd = 0;
         if (pleaOut != 0) {
             poolManager.take(Currency.wrap(plea), address(this), pleaOut);
-            IPLEAForHook(plea).burn(pleaOut);
+            IPLEA(plea).burn(pleaOut);
             totalBurned += pleaOut;
         }
         if (imdOut != 0) {
@@ -764,60 +763,10 @@ contract PleaHook {
         retainedImd += amount;
     }
 
-    // ------------------------------------------------------------------ claims
-
-    /// @notice Converts matured claims into real transfers: PLEA is burned, IMD goes to the owner,
-    /// the cashback float and the wall reserve. Pays the caller a tip when the work was worth it.
-    function settleClaims() external {
-        if (block.number <= lastClaimBlock) return;
-        if (!_hasClaims()) return;
-        uint256 work = abi.decode(_unlock(abi.encode(ACTION_SETTLE, "")), (uint256));
-        _payTip(msg.sender, work);
-    }
-
-    function _settleMatured() internal returns (uint256 work) {
-        if (block.number > lastClaimBlock && _hasClaims()) {
-            work = abi.decode(_unlock(abi.encode(ACTION_SETTLE, "")), (uint256));
-        }
-    }
-
-    function _hasClaims() internal view returns (bool) {
-        return pleaBurnClaims != 0 || imdRetainClaims != 0 || imdOwnerClaims != 0 || imdCashbackClaims != 0;
-    }
-
-    /// @dev Runs inside an open unlock (the hook's own or a swap's). Returns the IMD value settled.
-    function _redeem() internal returns (uint256 imdTotal) {
-        uint256 toBurn = pleaBurnClaims;
-        uint256 toRetain = imdRetainClaims;
-        uint256 toOwner = imdOwnerClaims;
-        uint256 toCashback = imdCashbackClaims;
-        pleaBurnClaims = 0;
-        imdRetainClaims = 0;
-        imdOwnerClaims = 0;
-        imdCashbackClaims = 0;
-        if (toBurn != 0) {
-            poolManager.burn(address(this), _id(plea), toBurn);
-            poolManager.take(Currency.wrap(plea), address(this), toBurn);
-            IPLEAForHook(plea).burn(toBurn);
-        }
-        imdTotal = toRetain + toOwner + toCashback;
-        if (imdTotal != 0) {
-            poolManager.burn(address(this), _id(address(imd)), imdTotal);
-            if (toOwner != 0) poolManager.take(Currency.wrap(address(imd)), owner, toOwner);
-            if (toRetain + toCashback != 0) {
-                poolManager.take(Currency.wrap(address(imd)), address(this), toRetain + toCashback);
-            }
-            retainedImd += toRetain;
-            cashbackFloat += toCashback;
-        }
-        emit ClaimsSettled(toBurn, toRetain, toOwner, toCashback);
-    }
-
-    /// @dev One tip per block, only for work worth at least `TIP_MIN_WORK`, paid from the reserve.
     function _payTip(address keeper, uint256 work) internal {
         uint256 tip = KEEPER_TIP;
-        if (work < TIP_MIN_WORK || block.number == lastTipBlock || retainedImd < tip) return;
-        lastTipBlock = block.number;
+        if (work < TIP_MIN_WORK || block.timestamp < lastTipAt + TIP_INTERVAL || retainedImd < tip) return;
+        lastTipAt = block.timestamp;
         retainedImd -= tip;
         (bool ok,) = address(imd).call(abi.encodeCall(IERC20.transfer, (keeper, tip)));
         if (!ok) retainedImd += tip;
@@ -853,9 +802,6 @@ contract PleaHook {
             IERC20(plea).transfer(address(poolManager), pleaReq);
             poolManager.settle();
             return abi.encode(pleaReq);
-        }
-        if (action == ACTION_SETTLE) {
-            return abi.encode(_redeem());
         }
         if (action == ACTION_REBALANCE) {
             (uint256 work, bool acted) = _rebalance();

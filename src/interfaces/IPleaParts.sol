@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+
+/// @notice IdentityMD Intake (same address on every chain). `request` pays for an oracle question
+/// and names a callback; `requests(id).completed` is set on every completion, answered or not.
+interface IIntake {
+    struct Callback {
+        address target;
+        bytes4 selector;
+    }
+
+    function request(bytes32 action, bytes calldata body, Callback calldata callback, address asset, uint256 amount)
+        external
+        payable
+        returns (bytes32 requestId);
+
+    function requests(bytes32 requestId)
+        external
+        view
+        returns (address payer, address callbackTarget, bytes4 callbackSelector, bool completed);
+}
+
+interface IPLEA {
+    function owner() external view returns (address);
+    function launcher() external view returns (address);
+    function hook() external view returns (address);
+    function gate() external view returns (address);
+    function seasons() external view returns (address);
+    function laureates() external view returns (address);
+    function poolManager() external view returns (address);
+    function restricted() external view returns (bool);
+    function balanceOf(address) external view returns (uint256);
+    function burn(uint256 amount) external;
+}
+
+interface IGate {
+    function restricted() external view returns (bool);
+    function cabalAlive() external view returns (bool);
+    function eraIndex() external view returns (uint32);
+    function eraTimes(uint256 era) external view returns (uint64 start, uint64 died);
+    function diedAt() external view returns (uint64);
+    function SEASON() external view returns (uint256);
+    function begin() external;
+    function revive(uint64 at) external;
+    function result(uint256 id)
+        external
+        view
+        returns (address seller, uint8 score, bool approved, uint64 verdictAt, uint32 era);
+    function pleaText(uint256 id) external view returns (string memory);
+}
+
+interface IPleaHook {
+    function poolManager() external view returns (address);
+    function poolKey() external view returns (PoolKey memory);
+    function pleaIsZero() external view returns (bool);
+    function latestPrice() external view returns (uint256);
+    function price24hAgo() external view returns (uint256);
+    function basisOf(address) external view returns (uint256 imdSpent, uint256 pleaHeld, uint256 avgBuyTime);
+    function fundWall(uint256 amount) external;
+    function seed() external;
+}
+
+interface ISeasons {
+    function relicOf(address wallet, uint256 era) external view returns (bool);
+}
+
+interface ILaureates {
+    function mint(address to, uint256 seasonKey, uint8 rank, uint256 pleaId) external returns (uint256 tokenId);
+    function nameOf(address wallet) external view returns (string memory);
+}
+
+interface IMoodBook {
+    function title(uint8 mood) external view returns (string memory);
+    function intro(uint8 mood) external view returns (string memory);
+    function definitions(uint8 mood) external view returns (string memory);
+}

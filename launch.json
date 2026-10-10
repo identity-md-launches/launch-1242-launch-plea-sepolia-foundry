@@ -1,0 +1,65 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "PLEA",
+      "constructorArgs": [
+        "$owner",
+        "0xF62c03E08ada871A0bEb309762E260a7a6a880E6",
+        "0x0227628f3F023bb0B980b67D528571c95c6DaC1c"
+      ]
+    },
+    {
+      "contract": "MoodBook",
+      "constructorArgs": []
+    },
+    {
+      "contract": "CabalGate",
+      "constructorArgs": [
+        "$contract:PLEA",
+        "$contract:MoodBook",
+        "0x1397434cd35e8a9c8ac312a61d3a285eb31dea56",
+        "0x44a1cd38474fb1748400e7deb5f8d786cce3f89a",
+        "0x2B69099E59b05901faA1DD164fabf098bf831E82",
+        "0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982",
+        "18000",
+        "1650"
+      ]
+    },
+    {
+      "contract": "Seasons",
+      "constructorArgs": [
+        "$contract:PLEA",
+        "$contract:CabalGate",
+        "0x2B69099E59b05901faA1DD164fabf098bf831E82",
+        "3600",
+        "3600",
+        "1200"
+      ]
+    },
+    {
+      "contract": "Laureates",
+      "constructorArgs": ["$contract:PLEA"]
+    },
+    {
+      "contract": "PleaDistributor",
+      "constructorArgs": ["$contract:PLEA", "$owner"]
+    },
+    {
+      "contract": "PleaLaunch",
+      "constructorArgs": [
+        "$contract:PLEA",
+        "$contract:CabalGate",
+        "$contract:Seasons",
+        "$contract:Laureates",
+        "$contract:PleaDistributor",
+        "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+        "0x2B69099E59b05901faA1DD164fabf098bf831E82",
+        "0x293C7134Ab8f6Bf1D8fF44Ed806575f8F1bAF477",
+        "1300000",
+        "1791979200"
+      ]
+    }
+  ],
+  "notes": "PLEA v10 (Seasons) on Sepolia (11155111), fast clock: 1 day = 20 minutes (season 5h = 18000 s, dead-man 27.5 min = 1650 s, break 1h, ransom window 1h, warning 20 min); plea timings stay real. Seven contracts in order, no external calls in any constructor except to contracts deployed earlier in this list. PLEA(owner, Uniswap V2 factory, V3 factory). CabalGate(plea, moodBook, Intake, oracle fee asset = test IMD 0x44a1, pool IMD = TestIMD 0x2b69, oracle signer, season seconds, dead-man seconds). Seasons(plea, gate, pool IMD, break, ransom window, warning). PleaLaunch(plea, gate, seasons, laureates, distributor, Uniswap v4 PoolManager, TestIMD, imd/acc Stacker, credit gas, START): its constructor registers the contracts with PLEA (deploy-transaction only) and commits to PleaHook's init code. After launch: deployHook(salt, initCode) with a salt mined off chain (script/MineSalt.s.sol), then seed() (owner any time, anyone after START)."
+}

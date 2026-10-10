@@ -18,7 +18,7 @@ contract OracleConformanceTest is Test {
     uint64 constant ISSUED_AT = 1800000000;
     uint64 constant EXPIRES_AT = 1800003600;
     string constant CALLBACK =
-        "deliverVerdict(uint256,(bytes32,uint256,bytes32,uint8,bytes,uint256,uint64,uint64,bytes32,bytes32,uint16,uint16,uint16,uint64,uint64),bytes)";
+        "onOracleResult(bytes32,(bytes32,uint256,bytes32,uint8,bytes,uint256,uint64,uint64,bytes32,bytes32,uint16,uint16,uint16,uint64,uint64),bytes)";
 
     address constant ORACLE_SIGNER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;
     address constant LIVE_CONSUMER = 0x37Bfb8AC7C960E558657871D41Ca70E07e7DbfFf;
@@ -28,8 +28,7 @@ contract OracleConformanceTest is Test {
     function setUp() public {
         vm.chainId(VECTOR_CHAIN);
         vm.warp(ISSUED_AT);
-        PLEA plea = new PLEA(address(this));
-        deployCodeTo("CabalGate.sol:CabalGate", abi.encode(address(plea), address(0x1234), SIGNER), VECTOR_CONSUMER);
+        deployCodeTo("CabalGate.sol:CabalGate", gateArgs(SIGNER), VECTOR_CONSUMER);
         consumer = CabalGate(VECTOR_CONSUMER);
     }
 
@@ -60,7 +59,14 @@ contract OracleConformanceTest is Test {
     }
 
     function test_callbackSelectorHasTheProtocolStruct() public view {
-        assertEq(consumer.deliverVerdict.selector, bytes4(keccak256(bytes(CALLBACK))));
+        assertEq(consumer.onOracleResult.selector, bytes4(keccak256(bytes(CALLBACK))));
+        assertEq(consumer.onOracleResult.selector, bytes4(0x510379c7));
+    }
+
+    function gateArgs(address signer) internal returns (bytes memory) {
+        PLEA plea = new PLEA(address(this), address(0), address(0));
+        address a = address(0x1234);
+        return abi.encode(address(plea), a, a, a, a, signer, uint256(15 days), uint256(33 hours));
     }
 
     function test_protocolSignatureRecoversToVectorSigner() public view {
@@ -73,10 +79,7 @@ contract OracleConformanceTest is Test {
     /// 0x37bfb8ac7c960e558657871d41ca70e07e7dbfff on Ethereum, recovers to the oracle signer.
     function test_liveAttestationRecoversToOracleSigner() public {
         vm.chainId(1);
-        PLEA plea = new PLEA(address(this));
-        deployCodeTo(
-            "CabalGate.sol:CabalGate", abi.encode(address(plea), address(0x1234), ORACLE_SIGNER), LIVE_CONSUMER
-        );
+        deployCodeTo("CabalGate.sol:CabalGate", gateArgs(ORACLE_SIGNER), LIVE_CONSUMER);
         CabalGate live = CabalGate(LIVE_CONSUMER);
         OracleAttestation.Attestation memory a = OracleAttestation.Attestation({
             requestId: 0xf7af4af1b84046499135283a3115884700000000000000000000000000000000,

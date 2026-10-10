@@ -143,3 +143,98 @@ contract BuyRouter {
         return abi.encode(buy ? (amountSpecified < 0 ? amountOut : amountIn) : amountOut);
     }
 }
+
+/// @dev The Intake's shape: request records the callback and forwards the fee; complete marks the
+/// request done and calls the callback once with a fixed 200k stipend, recording whether it worked.
+contract MockIntake {
+    struct Callback {
+        address target;
+        bytes4 selector;
+    }
+
+    struct Req {
+        address payer;
+        address target;
+        bytes4 selector;
+        bool completed;
+    }
+
+    uint256 public constant CALLBACK_GAS = 200_000;
+    address public constant PAY_TO = address(0xFEE);
+    IERC20 public immutable asset;
+    uint256 public nonce;
+    bytes32 public lastId;
+    bytes public lastBody;
+    mapping(bytes32 => Req) public requests;
+    mapping(bytes32 => bytes) public bodyOf;
+    uint256 public lastCallbackGasUsed;
+
+    constructor(IERC20 asset_) {
+        asset = asset_;
+    }
+
+    function request(bytes32, bytes calldata body, Callback calldata cb, address asset_, uint256 amount)
+        external
+        returns (bytes32 id)
+    {
+        require(asset_ == address(asset) && amount >= 0.5e18, "price");
+        id = keccak256(abi.encode(block.chainid, address(this), ++nonce));
+        requests[id] = Req(msg.sender, cb.target, cb.selector, false);
+        bodyOf[id] = body;
+        lastId = id;
+        lastBody = body;
+        asset.transferFrom(msg.sender, PAY_TO, amount);
+    }
+
+    function complete(bytes32 id, uint8 status, bytes calldata args) external returns (bool delivered) {
+        Req storage r = requests[id];
+        require(r.payer != address(0), "unknown");
+        require(!r.completed, "completed");
+        r.completed = true;
+        if (status == 0 && r.target != address(0)) {
+            bytes memory data = bytes.concat(r.selector, args);
+            address t = r.target;
+            uint256 g = gasleft();
+            assembly {
+                delivered := call(CALLBACK_GAS, t, 0, add(data, 0x20), mload(data), 0, 0)
+            }
+            lastCallbackGasUsed = g - gasleft();
+        }
+    }
+}
+
+contract MockUniV2Factory {
+    mapping(address => mapping(address => address)) public getPair;
+
+    function create(address a, address b) external returns (address pair) {
+        pair = address(new MockUniPair(a, b, 0));
+        getPair[a][b] = pair;
+        getPair[b][a] = pair;
+    }
+}
+
+contract MockUniV3Factory {
+    mapping(address => mapping(address => mapping(uint24 => address))) public getPool;
+
+    function create(address a, address b, uint24 fee) external returns (address pool) {
+        pool = address(new MockUniPair(a, b, fee));
+        getPool[a][b][fee] = pool;
+        getPool[b][a][fee] = pool;
+    }
+}
+
+/// @dev Stands in for a v2 pair or v3 pool: holds tokens and can send them (an LP exit or a buy).
+contract MockUniPair {
+    address public token0;
+    address public token1;
+    uint24 public fee;
+
+    constructor(address a, address b, uint24 f) {
+        (token0, token1) = a < b ? (a, b) : (b, a);
+        fee = f;
+    }
+
+    function send(IERC20 token, address to, uint256 amount) external {
+        token.transfer(to, amount);
+    }
+}
