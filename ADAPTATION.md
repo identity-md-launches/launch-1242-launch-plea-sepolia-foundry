@@ -1,8 +1,8 @@
 # PLEA launch adaptation
 
-The imported project already supports the requested six-contract launch. Production changes are limited to the two reproduced audit defects below. The supplied `launch.json`, constructor signatures, deployment order, ownership model, scripts, hook, dependencies and build configuration are unchanged. No network deployment or wallet access was performed.
+The imported project supports the requested six-contract launch. The initial accepted adaptation fixed replay and ranking defects, as recorded below. This revision adds the reproduced corrections described in the revision section; it retains those accepted fixes. The supplied `launch.json`, constructor signatures, deployment order, ownership model, scripts, dependencies and build configuration remain unchanged. No network deployment or wallet access was performed.
 
-## Changes and evidence
+## Initial accepted changes and evidence
 
 | File | Change | Reason and regression coverage |
 | --- | --- | --- |
@@ -37,7 +37,7 @@ All manifest addresses and numbers are preserved, including Sepolia chain ID 111
 
 `foundry.toml` remains intact: Solidity 0.8.26, Cancun, optimizer/via-IR settings, `bytecode_hash = "none"`, and `[lint] lint_on_build = false`. No dependency was added, fetched, removed or changed; the vendored `lib/` remains ordinary tracked files. No new launch token, proxy, administrative capability or manifest entry was added.
 
-## Validation and limits
+## Initial-round validation and limits
 
 - Before production edits: `forge test` passed all 105 original tests; the new oracle and ranking suites then failed against the unchanged production code with the reproduced replay, tie-order and payout failures.
 - After edits: the oracle regression suite, ranking regression suite and exact-manifest rehearsal all pass with the project's own configuration. Default Foundry fuzzing uses 32 runs per fuzz test.
@@ -57,3 +57,55 @@ All manifest addresses and numbers are preserved, including Sepolia chain ID 111
 Every runtime is below 24,576 bytes and every complete init code is below 49,152 bytes. These are the application artifacts, not the larger test harnesses.
 
 Testing uses local mocks for operational external dependencies; it does not prove live Intake, Stacker, token or PoolManager behavior. The existing suite covers both currency orientations and simulated normal/fast clocks; no wall-clock waiting or live broadcast was used. Hook liquidity math received no new exhaustive fuzz campaign. Slither, Mythril, explorer verification and live deployment were not run. The launch service still owns final transaction simulation and execution; the owner still supplies the Merkle root and the deployer still mines the hook salt.
+
+
+## Revision: reproduced findings and changes
+
+All 119 accepted tests passed on the starting tree. Before editing production code, the supplied proof was copied unchanged to `test/scratch/Proof_b4aab24b9b24.t.sol`: it failed with `owner fee not paid: 0 != 24630541871921182266`. Eight new regression cases per suite failed against the starting implementation with the reported cooldown, future-season payout, fee loss, appeal, recipient, cap-budget and dust-basis defects. Six additional scratch cases confirmed the advisory observations described below. The complete disposition of all 19 reports is in `.imd-responses.json`.
+
+| File | Revision and reason | Coverage |
+| --- | --- | --- |
+| `src/CabalGate.sol` | Track `lastLapsedAt` from the approval's verdict time and apply the existing four-hour cooldown when clearing an expired sell window. Approved/lapsed pleas still score; abandoning the sell cannot accelerate submissions. | `AuditRevision.t.sol`: rejection after seven minutes and immediately before the cooldown boundary; acceptance at exactly four hours; preserved season score. |
+| `src/CabalGate.sol` | Reset the original plea's `appealed` flag only when its appeal expires without a verdict. Clear stale requests before testing that flag on retry. A scored appeal still consumes the sole appeal, and retry still pays both fees within the original four-hour window. | Explicit no-verdict completion, automatic twenty-minute expiry, late callback, retry denial, and unchanged original deadline. |
+| `src/CabalGate.sol` | Require the hook's tracked PLEA to cover the proposed amount before using its holding-time and profit/loss components. A tiny bought position no longer supplies those points to a much larger untracked distribution. | Distribution plus dust buy, immediately and after seven days; existing ordinary-buy scoring and sale tests. This does not invent a cost basis for gifted/distributed tokens. |
+| `src/PleaHook.sol` | Restrict the documented unfunded-payout exception to the first buy. A later PoolManager shortage allocates ERC-6909 IMD claims directly to the owner, Seasons and trader. Count claims in the existing fee totals, emit `CashbackPaidClaims`, and reserve only the existing pool share for the wall. Normal funded cashback still goes through Stacker. | Supplied unchanged proof; exact fee conservation; holder-approved claim redemption; normal stacking on the next buy; real season prize redemption. |
+| `src/PleaHook.sol` | Require buy recipient data even after Cabal death, for both exact-input and exact-output buys. | Empty data reverts and valid recipient data credits the buyer, without crediting the router. Free selling after death remains covered by the existing suite. |
+| `src/PleaHook.sol` | Subtract `capDecayRemainder` from the available decay numerator. | The reported same-second two-buy sequence and randomized sequences checked against cumulative elapsed-time budget. The 300,000 PLEA/day rate and 900,000 floor are unchanged. |
+| `src/Seasons.sol`, `src/interfaces/IPleaParts.sol`, `src/PleaHook.sol` | Account prize assets in season buckets. The hook calls `checkpoint()` in the fee-paying swap, including payments in claims. A close uses that season's fees plus unpaid rollover from earlier closes. Seasons redeems its IMD claims through a guarded PoolManager unlock callback before paying or flushing. | Real late-close regression; boundary timestamps; multiple delayed closes; ordinary-token and claim funding; failed-recipient rollover; conservation fuzzing; death at a boundary or mid-season; final flush; callback access checks. |
+| `test/AuditRevision.t.sol`, `test/SeasonFunds.t.sol` | Add regressions and integration/accounting coverage for the changes above. Revision swap suites explicitly force opposite currency orderings. | Tests use the real vendored v4 PoolManager and local oracle/token/Stacker mocks. Funds-only tests isolate the leaderboard results to exercise accounting. |
+| `test/Seasons.t.sol`, `test/SeasonRanking.t.sol` | Main-clock scoring fixtures now wait the real four-hour lapse cooldown. Five-hour ranking unit cases use approved-result mocks because four pleas from one wallet no longer fit that window. Direct test donations are checkpointed when made. | The existing assertions remain; new integration tests exercise two actual paced approvals within the manifest's five-hour season. No production timing was shortened for a test. |
+| `README.md`, `ADAPTATION.md`, `.imd-responses.json` | Describe corrected behavior, claim payouts, donation accounting, evidence and report dispositions. | Required launch handoff and revision responses. |
+
+### Season accounting details
+
+`pot()` reports all held prize assets (ERC-20 IMD plus PoolManager IMD claims), including future seasons. A season's distributable budget is `seasonFees[season] + rollover` when it becomes the oldest open season. Every hook prize fee is checkpointed in the same swap, so neither a late closer nor an absent keeper can move later trading fees backwards. Bucketing and closing need no loop over elapsed seasons beyond the existing one-season-per-close API. Unpaid shares and payout rounding stay in rollover for the next close. The leaderboard, five Laureate slots, 60-point threshold and all prize percentages are unchanged.
+
+An unsolicited ERC-20 or claim transfer cannot reveal its historical transfer timestamp to Seasons. Such donations are assigned when first observed by `checkpoint()`; a donor can transfer and checkpoint together. Closing also checkpoints, assigning previously unobserved assets to the current season, never to an already-ended earlier season. After death, new donations belong to the final season, or its remaining rollover if already closed. Claim redemption changes the form of assets, not their season. The final flush clears the accounting and can also flush later donations.
+
+### Advisory decisions retained without redesign
+
+- **Whole-order execution (`ee3aab4e…`): disputed as a defect.** The starting-tree reproduction reaches `PartialFill` and rolls back the entire sale, including token movement. `executeSell` explicitly promises the entire approved amount in one swap; the oracle fee pays for judgment and never guarantees liquidity. Adding partial fills or editable approved amounts would change that policy. The later basis-coverage correction prevents the report's dust-funded setup from opening that particular oversized plea, but does not change execution semantics.
+- **Gross-cost loss score (`bfc69ac0…`): disputed as a defect.** The reported buy spends 50 IMD and its hourly-checkpoint value is about 48.673 IMD. Fees, the token burn and the hourly price explain a real shortfall against actual gross cost. Profit/loss points intentionally compare actual cost with checkpoint value. Even a neutral/non-loss position can earn nine points under the existing table, so the proposed expected score of 23 is not implied by this design. No fee exclusion or new loss threshold was introduced.
+- **Recording deadline (`75b7c738…`): disputed as a defect.** An unrecorded approval is excluded once someone closes after the expressly documented one-hour grace. The holder or any other caller can record before then or include it in the close. The test confirms exclusion at the boundary. Reopening paid rankings or extending the fixed grace would redesign settlement.
+- **External Stacker (`d970e4be…`): confirmed trust assumption.** A local impersonation demonstrates that its unlimited allowance covers retained wall IMD; this is not evidence that the live Stacker has an arbitrary-pull entry point. The accepted dependency allowance remains. Live dependency behavior was not independently verified in this revision.
+- **Privileges and post-launch setup (`b1646eff…`, `04f018b8…`, `b684645e…`): confirmed accepted assumptions.** The owner exemptions, one-shot distributor root, immutable fee/seed beneficiary, signer dependency, deployment-block registration fallback and later fixed-supply hook initialization remain exactly as documented above. All six launch constructors must run atomically.
+- **Intake request routing (`6af90e91…`): confirmed dependency assumption.** A malicious Intake can direct one unused answer to the wrong plea; a second delivery is rejected. The original repeated-use finding remains fixed by consumption. No canonical question schema or authenticated intake-ID/oracle-UUID mapping has been supplied, so none was guessed.
+- **Cap economics (`831feb67…`): confirmed numerical observation.** `(initialCap - CAP_FLOOR) / CAP_DECAY_PER_DAY` is 2,996 whole days. That long horizon is part of the numbers the brief explicitly preserves; the fractional-budget correction changes no parameter.
+- **Earlier audit coverage (`379556c3…`): coverage information, not a defect.** This revision independently ran local tests and read the affected source paths, protected floor, supplied proof and pinned references. It does not claim to have repeated the earlier contributor's live Sepolia bytecode checks.
+
+### Revision validation
+
+The project uses its original compiler, optimizer, Cancun settings, vendored dependencies and disabled build linter throughout. The exact six-constructor manifest rehearsal and the deployment-block fallback tests remain in the suite. No RPC, keys, broadcast, deployment, dependency installation, Slither or Mythril was used. Final `forge build` succeeds, including the deployment scripts. Final `forge test -vv` passes **158 tests across 20 suites, with no failures or skips**: **151 submitted tests across 18 suites**, plus the unchanged supplied proof and six scratch evidence cases. Default fuzzing remains 32 runs. The proof copy was compared byte-for-byte with its pinned input. Oracle callbacks use 58,694 gas for approval and 83,293 for denial in the existing stipend test, below its 120,000 bound and the Intake's 200,000 stipend.
+
+The unchanged exact-manifest factory rehearsal passes all wiring, explicit-owner, opcode, init-size and runtime-size assertions. Its deployment section measures **16,622,688 gas**, including loading the test bytecodes from storage, below the existing 16,777,216 test bound. This remains a local rehearsal, not a claim about the service's final transaction simulation. The separate-constructor same-block tests and later committed hook deployment also pass.
+
+| Contract | Final runtime bytes | Complete init-code bytes (arguments included) |
+| --- | ---: | ---: |
+| PLEA | 4,275 | 5,301 |
+| CabalGate | 19,652 | 21,463 |
+| Seasons | 10,199 | 10,786 |
+| Laureates | 10,274 | 11,187 |
+| PleaDistributor | 1,310 | 1,649 |
+| PleaLaunch | 1,962 | 26,722 |
+
+PleaHook's later-deployed runtime is 22,265 bytes. All six manifest artifacts retain the exact supported, nonpayable constructor ABIs with no unresolved links. A comparison against the starting revision confirms every source constant and the complete manifest/configuration/dependency paths are unchanged. `git diff --check` passes. `.imd-responses.json` parses with 19 distinct, complete finding responses. Remaining live-dependency and launch-owner assumptions are documented above; no live transaction was sent.

@@ -6,13 +6,13 @@ Launched through the IMD swarm from this repository (`launch.open` with `repoUrl
 
 ## How it works
 
-**Pleading.** A holder asks to sell up to 2.5M PLEA (at most 35% of their balance) with a plea of up to 280 bytes, and pays the 0.5 IMD oracle fee. The gate pays the IdentityMD Intake itself; the judges' signed score comes back through the Intake's callback. The contract computes a fact score (0-55) from the share sold, the buy-weighted holding time, profit or loss and the 24h price; the seller's **need** is 70 minus the fact score. A score at or above the need opens a 7-minute window to sell through the gate. A denial means a 4-hour wait, with one appeal (0.85 IMD, same or smaller amount) inside those 4 hours. A plea with no verdict expires after 20 minutes, or at once when the Intake reports the request finished without one.
+**Pleading.** A holder asks to sell up to 2.5M PLEA (at most 35% of their balance) with a plea of up to 280 bytes, and pays the 0.5 IMD oracle fee. The gate pays the IdentityMD Intake itself; the judges' signed score comes back through the Intake's callback. The contract computes a fact score (0-55) from the share sold, the buy-weighted holding time, profit or loss and the 24h price; the seller's **need** is 70 minus the fact score. A score at or above the need opens a 7-minute window to sell through the gate. An executed sale or lapsed approval means a 4-hour wait (from execution or the approval verdict, respectively). A denial also means a 4-hour wait, with one appeal (0.85 IMD, same or smaller amount) inside those 4 hours. A plea with no verdict expires after 20 minutes, or at once when the Intake reports the request finished without one. An unanswered appeal can be retried within the original appeal window, paying its fees again. Holding-time and profit/loss points require the hook-tracked position to cover the proposed sale.
 
 **The dead-man.** The Cabal lives from the moment trading opens until 33 hours pass without a signed verdict. Then it is dead for good: no plea can be submitted, and every transfer restriction ends. There is no way back.
 
-**Seasons.** Seasons of 15 days run back to back from launch; the last one ends when the Cabal dies. Every approved plea earns its score as points; each wallet's best three count. When a season ends, anyone calls `closeSeason`: the top 10 with at least 60 points are paid 25/18/14/11/9/7/6/4/3/3 % of the prize pot in IMD (unpaid shares roll over), and the season's five best pleas become **Laureate** NFTs, rendered on chain. After the last season is closed, anything left in the pot goes to the buy wall.
+**Seasons.** Seasons of 15 days run back to back from launch; the last one ends when the Cabal dies. Every approved plea earns its score as points; each wallet's best three count. When a season ends, anyone calls `closeSeason`: the top 10 with at least 60 points are paid 25/18/14/11/9/7/6/4/3/3 % of that season's prize fees plus earlier rollover in IMD (unpaid shares roll forward), and the season's five best pleas become **Laureate** NFTs, rendered on chain. After the last season is closed, anything left in the pot goes to the buy wall.
 
-**Fees** (every trade, paid in the same swap): 0.5% cashback to the trader as staked IMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the prize pot (to pool liquidity once the Cabal is dead), 0.25% to pool liquidity, and 0.25% of the PLEA leg burned. The first 90 minutes after trading opens add a launch fee falling from 70% to 0% and cap buys at 5M PLEA.
+**Fees** (every trade, allocated in the same swap): 0.5% cashback to the trader as staked IMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the prize pot (to pool liquidity once the Cabal is dead), 0.25% to pool liquidity, and 0.25% of the PLEA leg burned. The first 90 minutes after trading opens add a launch fee falling from 70% to 0% and cap buys at 5M PLEA.
 
 ## Contracts
 
@@ -45,7 +45,9 @@ forge test
 ## Notes
 
 - The oracle callback has 200k gas, so it stores the score only. Points are recorded by `Seasons.record(pleaId)` (anyone) or by `closeSeason`, which takes a list of plea ids; a season can be closed one hour after it ends.
-- On the very first buy after trading opens the PoolManager may hold no IMD yet, so that trade's cashback, owner and prize shares go to pool liquidity instead.
+- On the very first buy after trading opens the PoolManager may hold no IMD yet, so that trade's cashback, owner and prize shares go to pool liquidity instead. If a later buy exceeds the PoolManager's available IMD before input settlement, those shares are paid to their intended recipients as redeemable ERC-6909 IMD claims. Seasons redeems its claims when closing or flushing; owners and traders can redeem theirs through an approved PoolManager unlock caller. Funded cashback still uses Stacker, with the existing plain-IMD fallback if credit fails.
+- Every prize fee is assigned to the trading season in the swap itself, so delayed closes cannot spend later seasons' fees. `pot()` includes all seasons' assets and claims. Direct donations are assigned when first checkpointed; call `Seasons.checkpoint()` immediately after donating to select the current season.
+- Buy calls always provide `abi.encode(recipient)` in hook data, including after Cabal death, so cashback and cost basis do not accrue to the router.
 
 ## Credits
 

@@ -141,6 +141,7 @@ contract CabalGate is OracleAttestationConsumer {
     mapping(address => uint256) public pendingOf;
     mapping(address => uint256) public lastExecutedAt;
     mapping(address => uint256) public lastDeniedAt;
+    mapping(address => uint256) public lastLapsedAt;
     bool private callbackExpected;
 
     constructor(
@@ -224,14 +225,16 @@ contract CabalGate is OracleAttestationConsumer {
         else score += 5;
         IPleaHook h = hook();
         (uint256 spent, uint256 heldPlea, uint256 avgBuyTime) = h.basisOf(seller);
-        if (avgBuyTime != 0 && avgBuyTime <= block.timestamp) {
+        // An untracked distribution or transfer must not inherit the history of a dust buy.
+        bool covered = heldPlea >= amount;
+        if (covered && avgBuyTime != 0 && avgBuyTime <= block.timestamp) {
             uint256 held = block.timestamp - avgBuyTime;
             if (held >= 7 days) score += 14;
             else if (held >= 3 days) score += 9;
             else if (held >= 1 days) score += 5;
         }
         uint256 latest = h.latestPrice();
-        if (heldPlea != 0 && spent != 0) {
+        if (covered && heldPlea != 0 && spent != 0) {
             uint256 value = FullMath.mulDiv(heldPlea, latest, FixedPoint96.Q96);
             if (value < spent) {
                 score += 14;
@@ -259,15 +262,17 @@ contract CabalGate is OracleAttestationConsumer {
     }
 
     /// @notice Appeal a denied plea once, within 4 hours of the denial, for an amount no larger than
-    /// the original: 0.5 oracle IMD plus 0.35 pool IMD to the buy wall.
+    /// the original: 0.5 oracle IMD plus 0.35 pool IMD to the buy wall. An unanswered, expired
+    /// appeal may be retried within that same window, paying the fees again.
     function appeal(uint256 originalId, uint256 amount, string calldata text) external returns (uint256 id) {
         Plea storage o = pleas[originalId];
         if (o.seller != msg.sender) revert NotSeller();
         if (o.status != Status.Denied) revert NotDenied();
-        if (o.appealed || o.isAppeal) revert AlreadyAppealed();
+        if (o.isAppeal) revert AlreadyAppealed();
         if (block.timestamp > uint256(o.verdictAt) + COOLDOWN) revert AppealClosed();
         if (!cabalAlive()) revert CabalNotWatching();
         _clearStale(msg.sender);
+        if (o.appealed) revert AlreadyAppealed();
         if (pendingOf[msg.sender] != 0) revert PendingExists();
         if (amount > o.amount) revert AmountTooLarge();
         _checkAmount(msg.sender, amount);
@@ -328,6 +333,8 @@ contract CabalGate is OracleAttestationConsumer {
         if (lastExecutedAt[seller] != 0 && block.timestamp < until) revert Cooldown(until);
         until = lastDeniedAt[seller] + COOLDOWN;
         if (lastDeniedAt[seller] != 0 && block.timestamp < until) revert Cooldown(until);
+        until = lastLapsedAt[seller] + COOLDOWN;
+        if (lastLapsedAt[seller] != 0 && block.timestamp < until) revert Cooldown(until);
     }
 
     /// @dev Clears the seller's open plea when it can no longer act: a pending plea with no
@@ -340,6 +347,7 @@ contract CabalGate is OracleAttestationConsumer {
             _expire(id, p);
         } else if (p.status == Status.Approved && block.timestamp > uint256(p.verdictAt) + EXECUTE_WINDOW) {
             p.status = Status.Lapsed;
+            lastLapsedAt[seller] = p.verdictAt;
             pendingOf[seller] = 0;
             emit PleaLapsed(id);
         }
@@ -353,6 +361,7 @@ contract CabalGate is OracleAttestationConsumer {
 
     function _expire(uint256 id, Plea storage p) internal {
         p.status = Status.Expired;
+        if (p.isAppeal) pleas[p.originalId].appealed = false;
         if (pendingOf[p.seller] == id) pendingOf[p.seller] = 0;
         delete pleaOfIntake[p.intakeId];
         emit PleaExpired(id);

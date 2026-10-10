@@ -7,7 +7,7 @@ pragma solidity 0.8.26;
   with LP fee 0, the hook is the only LP, liquidity is locked forever (no closeMarket, no withdraw),
   trims burn 100% and recovered IMD becomes an IMD-only buy wall below the price.
 
-  Every fee is paid in the swap that earns it (no claims to settle later): 0.5% cashback to the
+  Every fee is allocated in the swap that earns it: 0.5% cashback to the
   trader as sIMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the season's prize pot
   (to pool liquidity once the Cabal is dead), 0.25% to pool liquidity, and 0.25% of the PLEA leg
   burned.
@@ -30,7 +30,7 @@ import {PoolId} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IStacker} from "./interfaces/IStacker.sol";
-import {IPLEA} from "./interfaces/IPleaParts.sol";
+import {IPLEA, ISeasons} from "./interfaces/IPleaParts.sol";
 
 contract PleaHook {
     using StateLibrary for IPoolManager;
@@ -62,6 +62,7 @@ contract PleaHook {
     event FeeRefunded(address indexed trader, address currency, uint256 amount, bool asClaims);
     event CashbackStacked(address indexed trader, uint256 amount);
     event CashbackPaidPlain(address indexed trader, uint256 amount);
+    event CashbackPaidClaims(address indexed trader, uint256 amount);
     event CapRatcheted(uint256 previousCap, uint256 newCap);
     event Trimmed(uint128 liquidityRemoved, uint256 pleaBurned, uint256 imdRetained);
     event WallDeployed(int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 imdDeployed);
@@ -161,6 +162,7 @@ contract PleaHook {
     /// @notice IMD the current wall was deployed with (what it has spent so far is `wallImd - imdInWall`).
     uint256 public wallImd;
     bool private callbackExpected;
+    bool private hasBought;
 
     mapping(address => Basis) public basisOf;
     Checkpoint[25] public ring;
@@ -416,7 +418,7 @@ contract PleaHook {
         address trader;
         if (hookData.length == 32) trader = abi.decode(hookData, (address));
         if (trader == address(0)) {
-            if (buy && alive) revert RecipientRequired();
+            if (buy) revert RecipientRequired();
             trader = sender;
         }
         uint256 amount = exactIn ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
@@ -508,14 +510,16 @@ contract PleaHook {
     }
 
     /// @dev Pays the fee deltas the hook holds, in this swap: PLEA burned; IMD to the owner, the prize
-    /// pot and the hook (for cashback); the pool share kept as claims for the wall. If the
-    /// PoolManager holds too little IMD to pay out (only possible on the first buy after seeding,
-    /// before any IMD sits in the pool), the payouts go to pool liquidity instead of reverting.
+    /// pot and the hook (for cashback); the pool share kept as claims for the wall. Only the first
+    /// buy may redirect an unfunded payout to liquidity. Later shortages pay ERC-6909 IMD claims
+    /// to the same beneficiaries, redeemable once the swapper settles its input.
     /// @return cashback IMD now held by the hook for the trader.
     function _payFees(address trader, bool buy, uint256 imdBasis, uint256 imdFee, uint256 pleaFee)
         internal
         returns (uint256 cashback)
     {
+        bool firstBuy = buy && !hasBought;
+        if (buy) hasBought = true;
         if (pleaFee != 0) {
             poolManager.take(Currency.wrap(plea), address(this), pleaFee);
             IPLEA(plea).burn(pleaFee);
@@ -528,15 +532,23 @@ contract PleaHook {
             // No seasons after the Cabal dies: the prize share joins pool liquidity.
             if (_alive()) toPrize = imdBasis * PRIZE_BPS / BPS;
             uint256 out = cashback + toOwner + toPrize;
-            if (imd.balanceOf(address(poolManager)) < out) {
+            bool asClaims = imd.balanceOf(address(poolManager)) < out;
+            if (asClaims && firstBuy) {
                 emit PayoutsToPool(out);
                 (cashback, toOwner, toPrize, out) = (0, 0, 0, 0);
             }
             uint256 toPool = imdFee - out;
-            Currency c = Currency.wrap(address(imd));
-            if (toOwner != 0) poolManager.take(c, owner, toOwner);
-            if (toPrize != 0) poolManager.take(c, seasons, toPrize);
-            if (cashback != 0) poolManager.take(c, address(this), cashback);
+            _payImd(owner, toOwner, asClaims);
+            _payImd(seasons, toPrize, asClaims);
+            if (toPrize != 0) ISeasons(seasons).checkpoint();
+            if (cashback != 0) {
+                _payImd(asClaims ? trader : address(this), cashback, asClaims);
+                if (asClaims) {
+                    totalCashback += cashback;
+                    emit CashbackPaidClaims(trader, cashback);
+                    cashback = 0; // the trader already holds the claim; no Stacker call is due
+                }
+            }
             if (toPool != 0) {
                 poolManager.mint(address(this), _id(address(imd)), toPool);
                 retainClaims += toPool;
@@ -546,6 +558,12 @@ contract PleaHook {
             totalPoolFees += toPool;
         }
         emit FeesTaken(trader, buy, imdBasis, imdFee, pleaFee, toPrize);
+    }
+
+    function _payImd(address to, uint256 amount, bool asClaims) internal {
+        if (amount == 0) return;
+        if (asClaims) poolManager.mint(to, _id(address(imd)), amount);
+        else poolManager.take(Currency.wrap(address(imd)), to, amount);
     }
 
     /// @dev Returns the part of the specified-side fee the fill did not earn. The swapper has not
@@ -630,7 +648,8 @@ contract PleaHook {
         if (held < inventoryCap) {
             uint256 next = held; // full ratchet
             uint256 elapsed = block.timestamp - lastCapDecayAt;
-            uint256 allowance = CAP_DECAY_PER_DAY * elapsed / 1 days;
+            uint256 budget = CAP_DECAY_PER_DAY * elapsed;
+            uint256 allowance = budget > capDecayRemainder ? (budget - capDecayRemainder) / 1 days : 0;
             uint256 rateFloor = inventoryCap > allowance ? inventoryCap - allowance : 0;
             if (next < rateFloor) next = rateFloor;
             if (next < CAP_FLOOR) next = CAP_FLOOR;

@@ -113,6 +113,7 @@ contract SeasonRankingTest is Test {
         uint256[] memory ids = new uint256[](4);
         (ids[0], ids[1], ids[2], ids[3]) = (4, 1, 3, 2);
         imd.mint(address(seasons), 1000e18);
+        seasons.checkpoint();
         vm.warp(uint256(gate.startedAt()) + gate.SEASON() + 1 hours);
         seasons.closeSeason(ids);
         assertEq(imd.balanceOf(bob), 250e18, "wrong wallet received first prize");

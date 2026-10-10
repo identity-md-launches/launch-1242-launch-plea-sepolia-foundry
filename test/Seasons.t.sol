@@ -29,10 +29,10 @@ contract SeasonsTest is Fixture {
         return 50e18;
     }
 
-    /// @dev Pleads and approves with `score`, then lets the window lapse so the wallet can plead again.
-    function scored(address who, uint256 score) internal returns (uint256 id) {
+    /// @dev Pleads and approves with `score`, then observes the cooldown on lapsed approvals.
+    function scored(address who, uint256 score) internal virtual returns (uint256 id) {
         id = approvedPlea(who, score);
-        skip(8 minutes);
+        skip(4 hours);
     }
 
     /// @dev Advances to `t`, delivering a denial often enough that the Cabal never goes silent.
@@ -153,6 +153,7 @@ contract SeasonsTest is Fixture {
         uint256 bobId = scored(bob, 45);
         assertGt(hook.totalPrize(), 0); // the hook's prize fee feeds the pot
         imd.mint(address(seasons), 1_000e18);
+        seasons.checkpoint(); // attribute this direct donation before the season ends
 
         liveUntil(t0() + SEASON);
         vm.expectRevert(abi.encodeWithSelector(Seasons.NotReady.selector, 0));
@@ -235,6 +236,21 @@ contract SeasonsTest is Fixture {
 
 /// @dev Sepolia's fast clock: 1 day = 20 minutes. Plea timings stay real.
 contract FastClockTest is SeasonsTest {
+    uint256 private nextScoredId = 1;
+
+    /// @dev The ranking unit cases require up to four scores from one wallet. That cannot fit in
+    /// five hours under the real four-hour cooldown. Supply approved-result fixtures for those
+    /// cases; AuditRevisionTest covers real, paced approvals and closing on the manifest's clock.
+    function scored(address who, uint256 score) internal override returns (uint256 id) {
+        id = nextScoredId++;
+        vm.mockCall(
+            address(gate),
+            abi.encodeCall(gate.result, (id)),
+            abi.encode(who, uint8(score), true, uint64(vm.getBlockTimestamp()))
+        );
+        vm.mockCall(address(gate), abi.encodeCall(gate.pleaText, (id)), abi.encode("Approved ranking fixture."));
+    }
+
     function setTimings() internal override {
         SEASON = 5 hours;
         DEADMAN = 27.5 minutes;

@@ -61,3 +61,7 @@ interface ILaureates {
     function mint(address to, uint256 seasonKey, uint8 rank, uint256 pleaId) external returns (uint256 tokenId);
     function nameOf(address wallet) external view returns (string memory);
 }
+
+interface ISeasons {
+    function checkpoint() external;
+}
