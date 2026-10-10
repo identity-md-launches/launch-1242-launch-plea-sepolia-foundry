@@ -13,6 +13,7 @@ pragma solidity 0.8.26;
 */
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
@@ -32,6 +33,7 @@ import {IPLEA} from "./interfaces/IPleaParts.sol";
 
 contract PleaHook {
     using StateLibrary for IPoolManager;
+    using SafeERC20 for IERC20;
 
     error NotLauncher();
     error NotPoolManager();
@@ -768,7 +770,7 @@ contract PleaHook {
 
     /// @notice Anyone may add IMD to the wall's reserve (the gate routes appeal fees here).
     function fundWall(uint256 amount) external {
-        imd.transferFrom(msg.sender, address(this), amount);
+        imd.safeTransferFrom(msg.sender, address(this), amount);
         retainedImd += amount;
     }
 
@@ -808,7 +810,7 @@ contract PleaHook {
             (uint256 pleaReq, uint256 imdReq) = pleaIsZero ? (n0, n1) : (n1, n0);
             if (imdReq != 0) revert InvalidLiquidity();
             poolManager.sync(Currency.wrap(plea));
-            IERC20(plea).transfer(address(poolManager), pleaReq);
+            IERC20(plea).safeTransfer(address(poolManager), pleaReq);
             poolManager.settle();
             return abi.encode(pleaReq);
         }
@@ -822,7 +824,7 @@ contract PleaHook {
     function _settleImd(uint256 amount) internal {
         if (amount == 0) return;
         poolManager.sync(Currency.wrap(address(imd)));
-        imd.transfer(address(poolManager), amount);
+        imd.safeTransfer(address(poolManager), amount);
         poolManager.settle();
     }
 
