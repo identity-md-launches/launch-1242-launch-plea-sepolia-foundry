@@ -7,9 +7,10 @@ pragma solidity 0.8.26;
   with LP fee 0, the hook is the only LP, liquidity is locked forever (no closeMarket, no withdraw),
   trims burn 100% and recovered IMD becomes an IMD-only buy wall below the price.
 
-  v10: every fee is paid in the swap that earns it (no claims to settle later): 0.5% cashback to the
-  trader as sIMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the season's prize pot,
-  0.25% to pool liquidity, and 0.25% of the PLEA leg burned.
+  Every fee is paid in the swap that earns it (no claims to settle later): 0.5% cashback to the
+  trader as sIMD through imd/acc's Stacker, 0.5% to the owner, 0.25% to the season's prize pot
+  (to pool liquidity once the Cabal is dead), 0.25% to pool liquidity, and 0.25% of the PLEA leg
+  burned.
 */
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -524,7 +525,8 @@ contract PleaHook {
         if (imdFee != 0) {
             cashback = imdBasis * CASHBACK_BPS / BPS;
             uint256 toOwner = imdBasis * OWNER_BPS / BPS;
-            toPrize = imdBasis * PRIZE_BPS / BPS;
+            // No seasons after the Cabal dies: the prize share joins pool liquidity.
+            if (_alive()) toPrize = imdBasis * PRIZE_BPS / BPS;
             uint256 out = cashback + toOwner + toPrize;
             if (imd.balanceOf(address(poolManager)) < out) {
                 emit PayoutsToPool(out);

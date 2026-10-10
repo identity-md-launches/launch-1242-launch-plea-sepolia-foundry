@@ -4,7 +4,6 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {PoolManager} from "v4-core/PoolManager.sol";
 import {PLEA} from "../src/PLEA.sol";
-import {MoodBook} from "../src/MoodBook.sol";
 import {CabalGate} from "../src/CabalGate.sol";
 import {Seasons} from "../src/Seasons.sol";
 import {Laureates} from "../src/Laureates.sol";
@@ -13,7 +12,7 @@ import {PleaLaunch} from "../src/PleaLaunch.sol";
 import {PleaHook} from "../src/PleaHook.sol";
 import {MockIMD, MockIntake} from "./utils/Mocks.sol";
 
-/// @dev The launch as IMD runs it: seven constructors, then deployHook and seed after launch.
+/// @dev The launch as IMD runs it: six constructors, then deployHook and seed after launch.
 contract LaunchTest is Test {
     address constant OWNER = 0x4b91078b2374c956A65F7Af0999CaE0a935E6821;
     address constant SIGNER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;
@@ -36,12 +35,9 @@ contract LaunchTest is Test {
 
     function deployAll(address poolManager) internal {
         MockIntake intake = new MockIntake(imd);
-        plea = new PLEA(OWNER, address(0), address(0));
-        MoodBook mb = new MoodBook();
-        gate = new CabalGate(
-            address(plea), address(mb), address(intake), address(imd), address(imd), SIGNER, 5 hours, 27.5 minutes
-        );
-        seasons = new Seasons(address(plea), address(gate), address(imd), 1 hours, 1 hours, 20 minutes);
+        plea = new PLEA(OWNER);
+        gate = new CabalGate(address(plea), address(intake), address(imd), address(imd), SIGNER, 5 hours, 27.5 minutes);
+        seasons = new Seasons(address(plea), address(gate), address(imd));
         Laureates l = new Laureates(address(plea));
         PleaDistributor d = new PleaDistributor(address(plea), OWNER);
         launch = new PleaLaunch(
@@ -78,7 +74,7 @@ contract LaunchTest is Test {
         assertEq(plea.gate(), address(gate));
         assertEq(plea.seasons(), address(seasons));
         assertTrue(plea.restricted());
-        assertEq(gate.eraStart(), 0);
+        assertEq(gate.startedAt(), 0);
     }
 
     function test_deployHookChecksTheInitCodeAndFlags() public {
@@ -112,7 +108,7 @@ contract LaunchTest is Test {
         vm.warp(START);
         launch.seed();
         assertTrue(gate.cabalAlive());
-        assertEq(gate.eraStart(), START);
+        assertEq(gate.startedAt(), START);
         vm.expectRevert();
         launch.seed();
     }
@@ -138,7 +134,7 @@ contract LaunchTest is Test {
         g = gasleft();
         launch.seed();
         uint256 seedGas = g - gasleft();
-        emit log_named_uint("launch (7 contracts + intake mock)", deployGas);
+        emit log_named_uint("launch (6 contracts + intake mock)", deployGas);
         emit log_named_uint("deployHook", hookGas);
         emit log_named_uint("seed", seedGas);
         assertLt(deployGas, 16_777_216);

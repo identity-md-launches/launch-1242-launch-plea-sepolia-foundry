@@ -202,39 +202,3 @@ contract MockIntake {
         }
     }
 }
-
-contract MockUniV2Factory {
-    mapping(address => mapping(address => address)) public getPair;
-
-    function create(address a, address b) external returns (address pair) {
-        pair = address(new MockUniPair(a, b, 0));
-        getPair[a][b] = pair;
-        getPair[b][a] = pair;
-    }
-}
-
-contract MockUniV3Factory {
-    mapping(address => mapping(address => mapping(uint24 => address))) public getPool;
-
-    function create(address a, address b, uint24 fee) external returns (address pool) {
-        pool = address(new MockUniPair(a, b, fee));
-        getPool[a][b][fee] = pool;
-        getPool[b][a][fee] = pool;
-    }
-}
-
-/// @dev Stands in for a v2 pair or v3 pool: holds tokens and can send them (an LP exit or a buy).
-contract MockUniPair {
-    address public token0;
-    address public token1;
-    uint24 public fee;
-
-    constructor(address a, address b, uint24 f) {
-        (token0, token1) = a < b ? (a, b) : (b, a);
-        fee = f;
-    }
-
-    function send(IERC20 token, address to, uint256 amount) external {
-        token.transfer(to, amount);
-    }
-}

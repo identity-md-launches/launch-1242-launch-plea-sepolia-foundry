@@ -64,9 +64,9 @@ contract OracleConformanceTest is Test {
     }
 
     function gateArgs(address signer) internal returns (bytes memory) {
-        PLEA plea = new PLEA(address(this), address(0), address(0));
+        PLEA plea = new PLEA(address(this));
         address a = address(0x1234);
-        return abi.encode(address(plea), a, a, a, a, signer, uint256(15 days), uint256(33 hours));
+        return abi.encode(address(plea), a, a, a, signer, uint256(15 days), uint256(33 hours));
     }
 
     function test_protocolSignatureRecoversToVectorSigner() public view {

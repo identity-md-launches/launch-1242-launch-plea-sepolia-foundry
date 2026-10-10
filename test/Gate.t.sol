@@ -53,20 +53,6 @@ contract GateTest is Fixture {
         }
     }
 
-    function test_allMoodDefinitionsFitImdLimits() public view {
-        for (uint8 m; m < 4; ++m) {
-            string memory json = string.concat("{", moodBook.definitions(m), "}");
-            string[] memory keys = vm.parseJsonKeys(json, "$");
-            assertGt(keys.length, 2);
-            for (uint256 i; i < keys.length; ++i) {
-                string memory v = vm.parseJsonString(json, string.concat(".", keys[i]));
-                assertLe(bytes(v).length, 512, keys[i]);
-                assertGt(bytes(v).length, 0);
-            }
-            assertLt(bytes(moodBook.intro(m)).length, 300);
-        }
-    }
-
     function test_approvedScoreOpensTheSellWindow() public {
         uint256 amount = plea.balanceOf(alice) / 10;
         uint256 id = plead(alice, amount);
@@ -160,7 +146,7 @@ contract GateTest is Fixture {
         assertGt(need, 45);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(CabalGate.CannotPass.selector, need));
-        gate.submitSell(amount, "x", 0, new bytes32[](0));
+        gate.submitSell(amount, "x");
     }
 
     function test_callbackOnlyFromIntakeAndOnlyForAPendingPlea() public {
@@ -231,7 +217,7 @@ contract GateTest is Fixture {
         plead(alice, 1e18);
         vm.prank(alice);
         vm.expectRevert(CabalGate.PendingExists.selector);
-        gate.submitSell(1e18, "again", 0, new bytes32[](0));
+        gate.submitSell(1e18, "again");
     }
 
     function test_cooldownAfterExecutedSell() public {
@@ -241,17 +227,9 @@ contract GateTest is Fixture {
         gate.executeSell(1);
         vm.prank(alice);
         vm.expectRevert();
-        gate.submitSell(1e18, "again", 0, new bytes32[](0));
+        gate.submitSell(1e18, "again");
         skip(4 hours);
         plead(alice, 1e18);
-    }
-
-    function test_claimsRefusedOutsideRekt() public {
-        bytes32[] memory txs = new bytes32[](1);
-        txs[0] = keccak256("tx");
-        vm.prank(alice);
-        vm.expectRevert(CabalGate.BadClaim.selector);
-        gate.submitSell(1e18, "rekt", 1, txs);
     }
 
     function test_textFilter() public {
@@ -269,11 +247,11 @@ contract GateTest is Fixture {
         for (uint256 i; i < bad.length; ++i) {
             vm.prank(alice);
             vm.expectRevert(CabalGate.BadPleaText.selector);
-            gate.submitSell(1e18, bad[i], 0, new bytes32[](0));
+            gate.submitSell(1e18, bad[i]);
         }
         vm.prank(alice);
         vm.expectRevert(CabalGate.BadPleaText.selector);
-        gate.submitSell(1e18, string(new bytes(281)), 0, new bytes32[](0));
+        gate.submitSell(1e18, string(new bytes(281)));
         plead(alice, 1e18, unicode"Arabic سلام and ✓ are fine");
     }
 
@@ -293,7 +271,7 @@ contract GateTest is Fixture {
         assertFalse(gate.cabalAlive());
         vm.prank(alice);
         vm.expectRevert(CabalGate.CabalNotWatching.selector);
-        gate.submitSell(1e18, "x", 0, new bytes32[](0));
+        gate.submitSell(1e18, "x");
     }
 
     function deliverOnce(bytes32 rid, OracleAttestation.Attestation memory a) internal returns (bool) {

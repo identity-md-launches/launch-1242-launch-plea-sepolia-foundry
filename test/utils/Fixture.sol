@@ -6,17 +6,16 @@ import {PoolManager} from "v4-core/PoolManager.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {OracleAttestation} from "../../src/OracleAttestation.sol";
 import {PLEA} from "../../src/PLEA.sol";
-import {MoodBook} from "../../src/MoodBook.sol";
 import {CabalGate} from "../../src/CabalGate.sol";
 import {Seasons} from "../../src/Seasons.sol";
 import {Laureates} from "../../src/Laureates.sol";
 import {PleaDistributor} from "../../src/PleaDistributor.sol";
 import {PleaLaunch} from "../../src/PleaLaunch.sol";
 import {PleaHook} from "../../src/PleaHook.sol";
-import {MockIMD, MockSIMD, MockStacker, BuyRouter, MockIntake, MockUniV2Factory, MockUniV3Factory} from "./Mocks.sol";
+import {MockIMD, MockSIMD, MockStacker, BuyRouter, MockIntake} from "./Mocks.sol";
 
-/// @dev Replays the launch (PLEA, MoodBook, CabalGate, Seasons, Laureates, PleaDistributor,
-/// PleaLaunch in one call context), mines the hook salt, deploys the hook and opens trading.
+/// @dev Replays the launch (PLEA, CabalGate, Seasons, Laureates, PleaDistributor, PleaLaunch in one
+/// call context), mines the hook salt, deploys the hook and opens trading.
 contract Fixture is Test {
     address constant OWNER = 0x4b91078b2374c956A65F7Af0999CaE0a935E6821;
     /// @dev anvil's second account, used as the test oracle signer.
@@ -27,9 +26,6 @@ contract Fixture is Test {
 
     uint256 SEASON = 15 days;
     uint256 DEADMAN = 33 hours;
-    uint256 BREAK = 72 hours;
-    uint256 WINDOW = 72 hours;
-    uint256 WARNING = 24 hours;
 
     PoolManager pm;
     MockIMD imd;
@@ -37,10 +33,7 @@ contract Fixture is Test {
     MockSIMD simd;
     MockStacker stacker;
     MockIntake intake;
-    MockUniV2Factory v2f;
-    MockUniV3Factory v3f;
     PLEA plea;
-    MoodBook moodBook;
     CabalGate gate;
     Seasons seasons;
     Laureates laureates;
@@ -73,8 +66,6 @@ contract Fixture is Test {
         simd = new MockSIMD();
         stacker = new MockStacker(imd, simd);
         intake = new MockIntake(oimd);
-        v2f = new MockUniV2Factory();
-        v3f = new MockUniV3Factory();
         deployLaunch();
         deployHook();
         vm.prank(OWNER);
@@ -107,12 +98,9 @@ contract Fixture is Test {
     }
 
     function deployLaunch() internal {
-        plea = new PLEA(OWNER, address(v2f), address(v3f));
-        moodBook = new MoodBook();
-        gate = new CabalGate(
-            address(plea), address(moodBook), address(intake), address(oimd), address(imd), SIGNER, SEASON, DEADMAN
-        );
-        seasons = new Seasons(address(plea), address(gate), address(imd), BREAK, WINDOW, WARNING);
+        plea = new PLEA(OWNER);
+        gate = new CabalGate(address(plea), address(intake), address(oimd), address(imd), SIGNER, SEASON, DEADMAN);
+        seasons = new Seasons(address(plea), address(gate), address(imd));
         laureates = new Laureates(address(plea));
         distributor = new PleaDistributor(address(plea), OWNER);
         launch = new PleaLaunch(
@@ -165,7 +153,7 @@ contract Fixture is Test {
 
     function plead(address who, uint256 amount, string memory text) internal returns (uint256 id) {
         vm.prank(who);
-        id = gate.submitSell(amount, text, 0, new bytes32[](0));
+        id = gate.submitSell(amount, text);
     }
 
     function intakeIdOf(uint256 id) internal view returns (bytes32) {

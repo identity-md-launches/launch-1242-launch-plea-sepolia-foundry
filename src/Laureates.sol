@@ -84,7 +84,7 @@ contract Laureates is ERC721 {
         _requireOwned(id);
         Laureate memory l = laureate[id];
         IGate g = IGate(plea.gate());
-        (address seller, uint8 score,,,) = g.result(l.pleaId);
+        (address seller, uint8 score,,) = g.result(l.pleaId);
         string memory text = g.pleaText(l.pleaId);
         string memory who = bytes(_names[seller]).length != 0 ? _names[seller] : Strings.toHexString(seller);
         string memory json = string.concat(
@@ -96,7 +96,7 @@ contract Laureates is ERC721 {
     }
 
     function _season(uint256 key) internal pure returns (string memory) {
-        return string.concat("Era ", Strings.toString(key / 2 + 1), ", season ", Strings.toString(key % 2 + 1));
+        return string.concat("Season ", Strings.toString(key + 1));
     }
 
     function _head(uint256 id, Laureate memory l, uint8 score, string memory who, string memory text)
@@ -128,10 +128,8 @@ contract Laureates is ERC721 {
 
     function _attributes(Laureate memory l, uint8 score) internal pure returns (string memory) {
         return string.concat(
-            '","attributes":[{"trait_type":"Era","value":',
-            Strings.toString(l.seasonKey / 2 + 1),
-            '},{"trait_type":"Season","value":',
-            Strings.toString(l.seasonKey % 2 + 1),
+            '","attributes":[{"trait_type":"Season","value":',
+            Strings.toString(uint256(l.seasonKey) + 1),
             '},{"trait_type":"Rank","value":',
             Strings.toString(l.rank),
             '},{"trait_type":"Score","value":',

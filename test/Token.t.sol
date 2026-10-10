@@ -3,7 +3,6 @@ pragma solidity 0.8.26;
 
 import {Fixture} from "./utils/Fixture.sol";
 import {PLEA} from "../src/PLEA.sol";
-import {MockUniPair} from "./utils/Mocks.sol";
 
 contract TokenTest is Fixture {
     function setUp() public override {
@@ -44,60 +43,18 @@ contract TokenTest is Fixture {
         plea.transfer(bob, 1e18);
     }
 
-    function test_freeWhenTheCabalSleepsAndLockedAgainWhenRevived() public {
+    function test_freeForeverOnceTheCabalDies() public {
         skip(DEADMAN);
         vm.prank(alice);
         plea.transfer(bob, 1e18);
-        skip(BREAK);
-        vm.prank(carol);
-        seasons.contribute(500e18);
+        skip(365 days);
+        assertFalse(plea.restricted());
+        vm.prank(bob);
+        plea.transfer(carol, 1e18);
+        // No verdict can bring it back: pleading is closed.
         vm.prank(alice);
-        plea.transfer(bob, 1e18); // warning: still free
-        skip(WARNING);
-        vm.prank(alice);
-        vm.expectRevert(PLEA.CabalIsWatching.selector);
-        plea.transfer(bob, 1e18);
-    }
-
-    function test_registeredExitPoolsCanSendButNeverReceive() public {
-        address pair = v2f.create(address(plea), address(imd));
-        address pool = v3f.create(address(plea), address(imd), 3000);
-        // Fund the pools while the Cabal sleeps.
-        skip(DEADMAN);
-        vm.startPrank(alice);
-        plea.transfer(pair, 1_000e18);
-        plea.transfer(pool, 1_000e18);
-        vm.stopPrank();
-        skip(BREAK);
-        vm.prank(carol);
-        seasons.contribute(500e18);
-        skip(WARNING);
-        assertTrue(plea.restricted());
-        // Unregistered: LPs are trapped.
-        vm.expectRevert(PLEA.CabalIsWatching.selector);
-        MockUniPair(pair).send(plea, bob, 1e18);
-        plea.registerExit(pair);
-        plea.registerExit(pool);
-        MockUniPair(pair).send(plea, bob, 1e18);
-        MockUniPair(pool).send(plea, bob, 1e18);
-        // Nobody can sell into them.
-        vm.prank(alice);
-        vm.expectRevert(PLEA.CabalIsWatching.selector);
-        plea.transfer(pair, 1e18);
-    }
-
-    function test_onlyGenuineUniswapPoolsRegister() public {
-        // Same tokens, same interface, not from the factory.
-        MockUniPair fake = new MockUniPair(address(plea), address(imd), 3000);
-        vm.expectRevert(PLEA.NotAnExitPool.selector);
-        plea.registerExit(address(fake));
-        // A genuine pair without PLEA.
-        address other = v2f.create(address(imd), address(oimd));
-        vm.expectRevert(PLEA.NotAnExitPool.selector);
-        plea.registerExit(other);
-        // A wallet.
-        vm.expectRevert(PLEA.NotAnExitPool.selector);
-        plea.registerExit(alice);
+        vm.expectRevert();
+        gate.submitSell(1e18, "come back");
     }
 
     function test_launcherAndInitAreOneShot() public {
@@ -109,7 +66,7 @@ contract TokenTest is Fixture {
         vm.expectRevert(PLEA.AlreadySet.selector);
         plea.init(alice, alice);
         // A fresh PLEA in a later block cannot be wired by anyone.
-        PLEA p = new PLEA(OWNER, address(0), address(0));
+        PLEA p = new PLEA(OWNER);
         vm.roll(vm.getBlockNumber() + 1);
         // forge keeps transient storage within a test, so clear the flag as a new transaction would.
         vm.store(address(p), bytes32(0), bytes32(0));

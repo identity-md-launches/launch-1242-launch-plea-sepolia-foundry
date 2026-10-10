@@ -38,16 +38,11 @@ interface IPLEA {
 interface IGate {
     function restricted() external view returns (bool);
     function cabalAlive() external view returns (bool);
-    function eraIndex() external view returns (uint32);
-    function eraTimes(uint256 era) external view returns (uint64 start, uint64 died);
+    function startedAt() external view returns (uint64);
     function diedAt() external view returns (uint64);
     function SEASON() external view returns (uint256);
     function begin() external;
-    function revive(uint64 at) external;
-    function result(uint256 id)
-        external
-        view
-        returns (address seller, uint8 score, bool approved, uint64 verdictAt, uint32 era);
+    function result(uint256 id) external view returns (address seller, uint8 score, bool approved, uint64 verdictAt);
     function pleaText(uint256 id) external view returns (string memory);
 }
 
@@ -62,17 +57,7 @@ interface IPleaHook {
     function seed() external;
 }
 
-interface ISeasons {
-    function relicOf(address wallet, uint256 era) external view returns (bool);
-}
-
 interface ILaureates {
     function mint(address to, uint256 seasonKey, uint8 rank, uint256 pleaId) external returns (uint256 tokenId);
     function nameOf(address wallet) external view returns (string memory);
-}
-
-interface IMoodBook {
-    function title(uint8 mood) external view returns (string memory);
-    function intro(uint8 mood) external view returns (string memory);
-    function definitions(uint8 mood) external view returns (string memory);
 }
