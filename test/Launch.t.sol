@@ -65,11 +65,9 @@ contract LaunchTest is Test {
         );
     }
 
-    function mine() internal view returns (bytes32) {
-        bytes32 h = keccak256(initCode());
+    function mine() internal view returns (bytes32 salt) {
         for (uint256 s;; ++s) {
             if (uint160(launch.predict(bytes32(s))) & 0x3fff == launch.FLAGS()) return bytes32(s);
-            h; // silence
         }
     }
 

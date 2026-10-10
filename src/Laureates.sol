@@ -87,26 +87,47 @@ contract Laureates is ERC721 {
         (address seller, uint8 score,,,) = g.result(l.pleaId);
         string memory text = g.pleaText(l.pleaId);
         string memory who = bytes(_names[seller]).length != 0 ? _names[seller] : Strings.toHexString(seller);
-        string memory season = string.concat(
-            "Era ", Strings.toString(l.seasonKey / 2 + 1), ", season ", Strings.toString(l.seasonKey % 2 + 1)
-        );
         string memory json = string.concat(
-            '{"name":"PLEA Laureate #',
-            Strings.toString(id),
-            '","description":"',
-            season,
+            _head(id, l, score, who, text),
+            Base64.encode(bytes(_svg(l, score, who, text, _season(l.seasonKey)))),
+            _attributes(l, score)
+        );
+        return string.concat("data:application/json;base64,", Base64.encode(bytes(json)));
+    }
+
+    function _season(uint256 key) internal pure returns (string memory) {
+        return string.concat("Era ", Strings.toString(key / 2 + 1), ", season ", Strings.toString(key % 2 + 1));
+    }
+
+    function _head(uint256 id, Laureate memory l, uint8 score, string memory who, string memory text)
+        internal
+        pure
+        returns (string memory)
+    {
+        string memory d = string.concat(
+            _season(l.seasonKey),
             ", rank ",
             Strings.toString(l.rank),
             ": plea #",
             Strings.toString(l.pleaId),
             " by ",
-            who,
+            _escapeJson(who),
             ", scored ",
             Strings.toString(score),
-            "/45 by the Cabal. ",
+            "/45 by the Cabal. "
+        );
+        return string.concat(
+            '{"name":"PLEA Laureate #',
+            Strings.toString(id),
+            '","description":"',
+            d,
             _escapeJson(text),
-            '","image":"data:image/svg+xml;base64,',
-            Base64.encode(bytes(_svg(l, score, who, text, season))),
+            '","image":"data:image/svg+xml;base64,'
+        );
+    }
+
+    function _attributes(Laureate memory l, uint8 score) internal pure returns (string memory) {
+        return string.concat(
             '","attributes":[{"trait_type":"Era","value":',
             Strings.toString(l.seasonKey / 2 + 1),
             '},{"trait_type":"Season","value":',
@@ -117,7 +138,6 @@ contract Laureates is ERC721 {
             Strings.toString(score),
             "}]}"
         );
-        return string.concat("data:application/json;base64,", Base64.encode(bytes(json)));
     }
 
     function _svg(Laureate memory l, uint8 score, string memory who, string memory text, string memory season)
