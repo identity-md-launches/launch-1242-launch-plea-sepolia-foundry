@@ -1,0 +1,99 @@
+{
+  "chainId": 11155111,
+  "sourceCommit": "7d247e8a45bbdbf04e727cb91e7b100ccfe9c7df",
+  "contracts": [
+    {
+      "name": "PLEA",
+      "address": "0x9b8d9aae44e81b1205e227911db279bde6edead9",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "fd0af8ee9aea241e4ee552565f839ef4a24b40084270a0c7d26057f4f1f0ff7e",
+      "abiHash": "6e7bc83d7622e3ad1cadee6c235daa622ab1e1c71fdffb712b574b09d05d164b"
+    },
+    {
+      "name": "CabalGate",
+      "address": "0x758b8300c62563591950f32717be44a5140a20f9",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "7c105a85b974e3242586ad673acdc71d26c75c070d5ec59e4da31bddd7a6f567",
+      "abiHash": "886c1963a15afc9c6cb058e112558a8bc9a0146596afcf83d0a8510566d06e56"
+    },
+    {
+      "name": "Seasons",
+      "address": "0x178481ac37e68a5c6ef95336db4616ba0169a17a",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "7207e63377e43a561742d0a13d069e56aef3982f1c7c29da5119cb5eb24f38ee",
+      "abiHash": "2c75099620eb06c544b149bc7475fbfd507b91913d829ccfe667052c3182349e"
+    },
+    {
+      "name": "Laureates",
+      "address": "0xd2311b6d4c42a6dc3900a0a74a364b2775dd61c1",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "66f368d7bf0441c1a5d37807c1e9b826833becd7806a66f31886078fa7b83ec6",
+      "abiHash": "097dfae041e8c7ea05d4dc34564cb9ea6eb2659fe19ff44d07c9fd602bcb1d27"
+    },
+    {
+      "name": "PleaDistributor",
+      "address": "0xabaecde2b71f0e3fa5d1b70f9a2bb9c24d6f3a7f",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "16029f59d9290a7a5ed2c9a4f8f3b6006b1fa8862e42904467de29e0aa7428b7",
+      "abiHash": "a7b7ac0dfcec50a5b2aab2f9267dcda521aff96e71eaf1a3f5af08ee4d5415c3"
+    },
+    {
+      "name": "PleaLaunch",
+      "address": "0x29aa568f93d7d4d8255ba54b6201bbe1abd01ab4",
+      "txHash": "0x9de8d4a7b24b04f2ee52fea389572341844d1a27d5a131f50194af83db833be8",
+      "blockNumber": 11885684,
+      "creationCodeHash": "ef10a64317c6b10fbe1dd054bdfbc34202e11ece244bda53d1cb5a11c665abaa",
+      "abiHash": "e72bfd8cc92dc8a7febe783b994dbbd3f32248a9304dab76425e2e58a96e4714"
+    }
+  ],
+  "network": {
+    "chainId": 11155111,
+    "name": "Sepolia",
+    "testnet": true,
+    "rpcUrls": [
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://rpc.sepolia.ethpandaops.io",
+      "https://sepolia.rpc.sentio.xyz"
+    ],
+    "explorer": "https://sepolia.etherscan.io",
+    "nativeCurrency": {
+      "name": "Sepolia Ether",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "faucets": [
+      "https://cloud.google.com/application/web3/faucet/ethereum/sepolia",
+      "https://www.alchemy.com/faucets/ethereum-sepolia"
+    ],
+    "uniswapV4": {
+      "poolManager": "0xe03a1074c86cfedd5c142c4f04f1a1536e203543",
+      "universalRouter": "0x3a9d48ab9751398bbfa63ad67599bb04e4bdf98b",
+      "quoter": "0x61b3f2011a92d183c7dbadbda940a7555ccf9227",
+      "stateView": "0xe1dd9c3fa50edb962e442f60dfbc432e24537e4c",
+      "positionManager": "0x429ba70129df741b2ca2a85bc3a2a3328e5c09b4",
+      "permit2": "0x000000000022d473030f116ddee9f6b43ac78ba3"
+    }
+  },
+  "walletAddChain": {
+    "chainId": "0xaa36a7",
+    "chainName": "Sepolia",
+    "rpcUrls": [
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://rpc.sepolia.ethpandaops.io",
+      "https://sepolia.rpc.sentio.xyz"
+    ],
+    "nativeCurrency": {
+      "name": "Sepolia Ether",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "blockExplorerUrls": [
+      "https://sepolia.etherscan.io"
+    ]
+  }
+}
